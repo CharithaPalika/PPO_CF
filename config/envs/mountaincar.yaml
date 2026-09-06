@@ -1,0 +1,88 @@
+# MountainCar-v0 -- the environment NB01/NB02 originally passed Gate 1 and
+# Gate 2 on. Kept so those results stay reproducible; it is NOT the current
+# target.
+#
+# WHY IT WAS ABANDONED. Every reward is -1, so before the first goal reach the
+# critic is a literal constant, V = -99.99 with sd 0.00, which is -1/(1-gamma):
+# the value of never terminating. A_CF is then exactly zero to four decimal
+# places during the phase where the task is hard, so the counterfactual oracle
+# cannot say anything about exploration -- which is MountainCar's entire
+# difficulty.
+#
+# The four settings below were forced by measurement, not taste; see `note`.
+
+env:
+  env_id: MountainCar-v0
+  n_envs: 16
+  max_episode_steps: 500       # exploration knob; evaluated at the standard 200
+  obs_norm: fixed
+  layout_seeds: null
+
+ppo:
+  total_timesteps: 400000
+  n_steps: 32
+  n_epochs: 4
+  n_minibatches: 4
+  learning_rate: 0.0007
+  anneal_lr: true
+  optim_eps: 1.0e-05
+  gamma: 0.99
+  gae_lambda: 0.98
+  clip_coef: 0.2
+  clip_vloss: true
+  ent_coef: 0.003
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: null
+
+  norm_adv: minibatch          # what the passed Gate-1 runs used
+  norm_adv_min_std: 1.0e-06
+
+  ent_mode: adaptive
+  target_entropy_frac_start: 0.55
+  target_entropy_frac_end: 0.02
+  ent_anneal_full_rate: 0.80
+  prob_floor_start: 0.0
+  prob_floor_end: 0.0
+
+  encoder: mlp
+  share_encoder: false
+  hidden_sizes: [64, 64]
+  activation: tanh
+  separate_grad_clip: true
+  device: cpu
+
+run:
+  run_name: nb01_baseline
+  seeds: [0, 1, 2]
+  trajectory_stride: 1
+  compact_trajectory_dtypes: false
+  log_every_updates: 10
+  record_trajectories: true
+
+reward:
+  potential_shaping: false
+  count_bonus_coef: 0.0
+
+oracle:
+  checkpoint_fraction: 0.75
+
+note: |
+  Four settings forced by measurement:
+  1. separate_grad_clip -- value loss is O(1e3) from update 1, so under a
+     single global clip the critic dominates the norm, the whole vector is
+     rescaled by ~1/40, and the policy freezes (entropy pinned at log 3,
+     approx_kl ~1e-6).
+  2. max_episode_steps 500, evaluated at 200. Limit 200 -> first goal reach
+     needs >500k steps; 500 -> ~130-220k; 1000 -> never.
+  3. Adaptive entropy floor, not a fixed ent_coef. A uniform policy reaches the
+     goal 0 times in 2000 episodes (best position -0.17 vs goal +0.50), so high
+     ent_coef pins success probability at zero; ent_coef = 0 collapses to a
+     deterministic bad policy pre-reward, which is irrecoverable. Fixed 0.003
+     gave 1 of 3 seeds.
+  4. The entropy anneal is success-proportional, not wall-clock. A time-based
+     anneal is what lost seeds 1 and 2.
+
+  Gate 1 results (3 seeds, 400k steps): first goal reach 164k / 158k / 220k,
+  greedy success 1.00 / 1.00 / 1.00 at the 500-step limit, explained variance
+  0.948 / 0.968 / 0.955.

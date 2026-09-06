@@ -1,0 +1,90 @@
+# PPO-CF experiment, rung 2: MiniGrid-DoorKey-6x6-v0.
+#
+# ONE config drives BOTH arms of the comparison. The notebook builds the
+# control arm by overriding `ppo.pg_mode: gae` and the treatment arm with
+# `ppo.pg_mode: cf_all_action`, so every other hyperparameter is identical by
+# construction and the only difference between the runs is the policy gradient.
+#
+# NO WARM START, deliberately, unlike the plain-PPO 6x6 config. A controlled
+# CF-vs-GAE comparison must not start from a policy trained under a different
+# policy gradient -- both arms begin from scratch, so the only difference
+# between them is the gradient itself.
+#
+# Plain PPO WITH a warm start needed 1.13M frames here. From scratch, 750k will
+# very likely leave both arms unsolved, and that is fine: the metric becomes
+# progress at a fixed budget (door rate and success rate at 750k), which is a
+# legitimate comparison and a far more discriminating one than 5x5, where
+# baseline PPO already wins easily.
+#
+# Runtime: control ~7 min/seed; CF ~57 min/seed at cf_restore=exact. Consider
+# cf_restore: fast (verified equivalent in the notebook) and 2 seeds here.
+
+env:
+  env_id: MiniGrid-DoorKey-6x6-v0
+  n_envs: 16
+  max_episode_steps: null
+  obs_norm: image
+  fully_observable: true       # the oracle needs an MDP; do not change
+  layout_seeds: null
+  layout_seed_mode: cycle
+
+ppo:
+  total_timesteps: 750000
+  n_steps: 128
+  n_epochs: 4
+  n_minibatches: 8
+  learning_rate: 0.001
+  anneal_lr: false
+  optim_eps: 1.0e-8
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_coef: 0.2
+  clip_vloss: true
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: null
+
+  norm_adv: batch
+  norm_adv_min_std: 1.0e-06
+
+  pg_mode: cf_all_action       # the notebook overrides this per arm
+  cf_restore: exact
+  cf_validate: true
+
+  ent_mode: fixed
+  prob_floor_start: 0.0
+  prob_floor_end: 0.0
+
+  encoder: cnn
+  share_encoder: true
+  hidden_sizes: [64]
+  activation: tanh
+  separate_grad_clip: false
+  device: cpu
+
+run:
+  run_name: dk6x6            # the notebook appends _gae / _cf
+  seeds: [0, 1]
+  trajectory_stride: 4
+  compact_trajectory_dtypes: true
+  log_every_updates: 10
+  record_trajectories: true
+  eval_every_updates: 0
+  eval_episodes: 20
+  init_from: null
+
+reward:
+  # Must stay off. The oracle computes Q_CF from the RAW environment reward; if
+  # the critic were trained on a shaped one, A_CF would mix two different
+  # reward functions. config._validate refuses the combination.
+  potential_shaping: false
+  count_bonus_coef: 0.0
+
+oracle:
+  checkpoint_fraction: 0.75
+
+note: |
+  The critic is still trained on GAE returns in both arms -- only the POLICY
+  loss changes. That keeps V a value function for pi, which is what Q_CF
+  bootstraps through, and keeps the value-side diagnostics comparable.

@@ -1,0 +1,114 @@
+# MiniGrid-DoorKey-8x8-v0 -- rung 3 of the curriculum, and the original target.
+#
+# MEASURED FAILURE, for the record. Reference rl-starter-files defaults, random
+# layouts, no warm start, 3M frames, 1 seed:
+#   success_rate_100 never left 0.00-0.03 (uniform random = 0.021)
+#   mean_length_100 = 640 (the truncation limit) at every logged update
+#   v_loss -> 1e-19, explained_variance -> exactly 0
+#   key pickup 40-80% throughout, solved ~0%
+# The agent reached the key constantly and never converted that into opening
+# the door. The critic correctly learned V = 0 everywhere because the returns
+# really are 0, so there was no gradient to tune. The entropy and clipfrac
+# wobble in that run was the policy being random-walked by advantage noise
+# rescaled to unit variance -- see ppo.norm_adv_min_std.
+#
+# WHAT THE CURRICULUM MEASURED (both rungs solved, seed 0):
+#   5x5, 500k: success 1.00 from ~120k, greedy 0.94, EV median 0.614
+#   6x6, 1.5M: success 1.00 from ~1.13M, greedy 0.86, EV median 0.819
+# On 6x6 the door rate tracked the success rate almost exactly (0.48/0.45,
+# 0.61/0.61, 0.79/0.79, 1.00/1.00) while the key rate ran well ahead of
+# both (0.74 when door was 0.48). So P(solve | door open) ~= 1 and the
+# lossy leg is key -> door. If 8x8 stalls, expect it to stall there, and
+# reward.potential_door is the targeted lever.
+#
+# So this config differs from the failed one in four ways: a warm start from
+# 6x6, a shared encoder, batch-scope advantage normalisation with a
+# zero-variance guard, and a per-action probability floor protecting `pickup`
+# and `toggle`. Do not run this until 6x6 works.
+#
+# THE OTHER LEVER, if the curriculum stalls: set `layout_seeds` to a small pool.
+# Nothing in NB02-06 needs generalisation across layouts -- the oracle restores
+# specific states under a specific policy -- so [0] (one fixed layout) or
+# [0..7] collapses the exploration problem the project does not care about.
+
+env:
+  env_id: MiniGrid-DoorKey-8x8-v0
+  n_envs: 16
+  max_episode_steps: null      # MiniGrid's own limit: 10 * 8^2 = 640
+  obs_norm: image
+  fully_observable: true
+  layout_seeds: null           # <- try [0] or [0,1,2,3,4,5,6,7] if stuck
+  layout_seed_mode: cycle
+
+ppo:
+  total_timesteps: 3000000
+  n_steps: 128
+  n_epochs: 4
+  n_minibatches: 8
+  learning_rate: 0.001
+  anneal_lr: false
+  optim_eps: 1.0e-8
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_coef: 0.2
+  clip_vloss: true
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: null
+
+  norm_adv: batch
+  norm_adv_min_std: 1.0e-06
+
+  ent_mode: fixed
+  # 0.0, matching the recipe that solved 5x5 and 6x6. The floor was set to
+  # 0.05 here defensively, before either rung had run. Both rungs then kept
+  # pickup and toggle healthy with no floor at all, and 8x8 was the only
+  # config differing from the proven recipe -- so it now matches. Raise it
+  # to 0.05 only if the per-action panel shows pi(pickup) or pi(toggle)
+  # actually decaying below ~0.01; it anneals to prob_floor_end in
+  # proportion to measured success.
+  prob_floor_start: 0.0
+  prob_floor_end: 0.0
+
+  encoder: cnn
+  share_encoder: true
+  hidden_sizes: [64]
+  activation: tanh
+  separate_grad_clip: false
+  device: cpu
+
+run:
+  run_name: doorkey8x8
+  seeds: [0]
+  trajectory_stride: 8         # ~465 MB RAM at 3M frames; stride 4 doubles it
+  compact_trajectory_dtypes: true
+  log_every_updates: 10
+  record_trajectories: true
+  eval_every_updates: 0
+  eval_episodes: 20
+  init_from: runs/doorkey6x6/seed_{seed}/checkpoints/ckpt_100.pt
+
+reward:
+  # Both off by default. Potential shaping is oracle-safe (V_true = V_shaped +
+  # Phi is exact); the count bonus is not, and must anneal to zero before the
+  # checkpoint the oracle uses. Suggested starting values if you turn them on:
+  #   potential_shaping: true, potential_key: 0.2, potential_door: 0.4
+  #   count_bonus_coef: 0.005, count_bonus_anneal_frac: 0.5
+  potential_shaping: false
+  potential_key: 0.0
+  potential_door: 0.0
+  count_bonus_coef: 0.0
+  count_bonus_anneal_frac: 0.5
+
+oracle:
+  checkpoint_fraction: 0.75
+
+note: |
+  There is no community-tuned recipe for DoorKey-8x8 specifically:
+  rl-baselines3-zoo tunes DoorKey-5x5 only and marks several MiniGrid envs
+  unsolved, and rl-starter-files issue #53 ("did anyone solve DoorKey-8x8 with
+  PPO?") has been open and unanswered since 2020. Note also that those defaults
+  were tuned for the 7x7 EGOCENTRIC partial view; this project runs fully
+  observable in absolute coordinates because the oracle needs an MDP, so
+  published DoorKey numbers are not a like-for-like reference.

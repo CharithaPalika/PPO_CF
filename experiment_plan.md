@@ -19,12 +19,31 @@ performance checks.
 
 | # | Notebook | Purpose | Status | Date |
 |---|----------|---------|--------|------|
-| 01 | `01_train_ppo_baseline` | Working PPO + trajectory/checkpoint generation | **Done — Gate 1 passed** | 2026-09-05 |
+| 01 | `01_train_ppo_baseline` | Working PPO + trajectory/checkpoint generation | **Gate 1 passed on MountainCar; ported to DoorKey-8x8, smoke test passed** | 2026-09-06 |
 | 02 | `02_counterfactual_oracle` | Explicit all-action reference landscape | **Written — Gate 2 passes at the 75% checkpoint** | 2026-09-05 |
 | 03 | `03_cocoa_landscape` | Trajectory-only counterfactual landscape | Not started | — |
 | 04 | `04_validate_landscape` | COCOA vs explicit reference | Not started | — |
 | 05 | `05_state_to_landscape` | Learn B(s) ≈ A_CF(s,·) | Not started | — |
 | 06 | `06_cf_ppo_smoke_test` | Landscape-based PPO regularization | Not started | — |
+
+## Environment history
+
+The plan's design is environment-agnostic; the target environment has changed
+twice for reasons that were measured, not assumed. All three configs remain in
+`config.ENV_PRESETS` and the codebase runs any of them.
+
+| env | why it was tried | why it was left | random-policy success |
+|---|---|---|---|
+| MountainCar-v0 | the plan's original choice | the critic is a constant (V = −99.99, sd 0.00) until the first goal reach, so **A_CF is exactly zero during the phase where the task is hard**. The oracle cannot help with exploration, which is the entire difficulty. | **0 / 2000** |
+| Taxi-v4 | dense −10 penalties differentiate actions from step 1, so the critic is informative immediately | PPO falls into Taxi's trap: an illegal pickup costs −10 while idling costs −1, so π(PICKUP) → 0.0016 and π(DROPOFF) peaks at 0.007 across all 500 states. Return pinned at −200.0. Entropy regularisation cannot fix this — it is maximised just as well by spreading mass over the four movement actions. Fixed by a per-action probability floor (`PPOConfig.prob_floor_*`), but the env was superseded first. | 94 / 2000 (4.7%) |
+| **MiniGrid-DoorKey-8x8-v0** | **current target.** Sparse but reachable reward, 7 actions, deterministic, exact state restore. | — | **42 / 2000 (2.1%)** |
+
+**Why DoorKey-8x8 is used fully observable.** MiniGrid's default 7×7 egocentric
+view makes it a POMDP, and `A_CF = r + γV(s′) − V_π(s)` is only well-defined in
+an MDP: the critic would learn V(o) rather than V(s), and two distinct simulator
+states can produce byte-identical observations. `FullyObsWrapper` (8×8×3 grid
+encoding) keeps it Markov. This diverges from published partial-observation
+baselines and is a deliberate trade.
 
 ## Go / No-Go gates
 

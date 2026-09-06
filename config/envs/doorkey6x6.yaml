@@ -1,0 +1,77 @@
+# MiniGrid-DoorKey-6x6-v0 -- rung 2 of the curriculum.
+#
+# Same configuration as 5x5 with more frames and a warm start. Only move here
+# once 5x5 is solved; a warm start from a policy that did not learn anything is
+# just a slower random initialisation.
+#
+# `run.init_from` points at the 5x5 run's final checkpoint. "{seed}" is
+# substituted per seed. Grid size changes the encoder's output width, so
+# incompatible tensors are skipped and reported rather than raising -- on
+# MiniGrid the conv stack is size-agnostic (it always reduces to a 64-wide
+# embedding for 5x5, 6x6, 7x7 and 8x8), so in practice everything transfers.
+
+env:
+  env_id: MiniGrid-DoorKey-6x6-v0
+  n_envs: 16
+  max_episode_steps: null      # MiniGrid's own limit: 10 * 6^2 = 360
+  obs_norm: image
+  fully_observable: true
+  layout_seeds: null
+  layout_seed_mode: cycle
+
+ppo:
+  total_timesteps: 1500000
+  n_steps: 128
+  n_epochs: 4
+  n_minibatches: 8
+  learning_rate: 0.001
+  anneal_lr: false
+  optim_eps: 1.0e-8
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_coef: 0.2
+  clip_vloss: true
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: null
+
+  norm_adv: batch
+  norm_adv_min_std: 1.0e-06
+
+  ent_mode: fixed
+  prob_floor_start: 0.0
+  prob_floor_end: 0.0
+
+  encoder: cnn
+  share_encoder: true
+  hidden_sizes: [64]
+  activation: tanh
+  separate_grad_clip: false
+  device: cpu
+
+run:
+  run_name: doorkey6x6
+  seeds: [0]
+  trajectory_stride: 4
+  compact_trajectory_dtypes: true
+  log_every_updates: 10
+  record_trajectories: true
+  eval_every_updates: 0
+  eval_episodes: 20
+  init_from: runs/doorkey5x5/seed_{seed}/checkpoints/ckpt_100.pt
+
+reward:
+  potential_shaping: false
+  potential_key: 0.0
+  potential_door: 0.0
+  count_bonus_coef: 0.0
+
+oracle:
+  checkpoint_fraction: 0.75
+
+note: |
+  Rung 2. If 6x6 stalls with a warm start from a solved 5x5, the failure is
+  about generalising to a bigger grid rather than about finding the first
+  reward -- check the key/door sub-goal rates in scalars.csv to tell which
+  rung of the task the policy is stuck on before changing hyperparameters.

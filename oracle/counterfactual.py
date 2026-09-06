@@ -56,6 +56,15 @@ def compute_landscape(
     terminated = np.zeros((N, K), dtype=bool)
     truncated = np.zeros((N, K), dtype=bool)
 
+    # WARNING -- elapsed_steps=0 IS WRONG ON MINIGRID.
+    # It was correct for MountainCar, where every reward is -1 regardless of
+    # when it is collected. DoorKey pays 1 - 0.9*(step_count/max_steps) on
+    # success, so zeroing the step count inflates every counterfactual success
+    # (measured on DoorKey-5x5: 0.9964 instead of 0.5698, 1.75x) and it also
+    # disables MiniGrid's internal truncation. `oracle/online.py` restores the
+    # state's own step count and should be followed here before NB02 is re-run
+    # on any MiniGrid environment. Left as-is for now so the MountainCar Gate 2
+    # results stay reproducible.
     for i in range(N):
         # Restore once to read the observation the policy would see in s.
         obs0[i] = set_sim_state(env, sim_states[i], elapsed_steps=0)

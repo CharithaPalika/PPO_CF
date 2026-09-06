@@ -23,19 +23,27 @@ import torch
 class RolloutBuffer:
     """Arrays are (n_steps, n_envs, ...)."""
 
-    def __init__(self, n_steps: int, n_envs: int, obs_dim: int, n_actions: int, device: str = "cpu"):
+    def __init__(self, n_steps: int, n_envs: int, input_dim: int, raw_obs_dim: int,
+                 n_actions: int, sim_state_dim: int | None = None, device: str = "cpu"):
+        # input_dim   = width of the network input (after the scaler)
+        # raw_obs_dim = width of the raw observation / simulator state
+        # These differ whenever the observation is categorical: Taxi-v4 is
+        # raw_obs_dim=1, input_dim=500.
         self.n_steps, self.n_envs = n_steps, n_envs
-        self.obs_dim, self.n_actions = obs_dim, n_actions
+        self.input_dim, self.raw_obs_dim = input_dim, raw_obs_dim
+        # MiniGrid's restorable state is wider than its observation (198 vs 192).
+        self.sim_state_dim = raw_obs_dim if sim_state_dim is None else sim_state_dim
+        self.n_actions = n_actions
         self.device = device
         self.reset()
 
     def reset(self) -> None:
         T, N = self.n_steps, self.n_envs
-        self.obs = np.zeros((T, N, self.obs_dim), dtype=np.float32)        # scaled
-        self.raw_obs = np.zeros((T, N, self.obs_dim), dtype=np.float32)    # unscaled
-        self.sim_state = np.zeros((T, N, self.obs_dim), dtype=np.float64)
-        self.next_raw_obs = np.zeros((T, N, self.obs_dim), dtype=np.float32)
-        self.next_sim_state = np.zeros((T, N, self.obs_dim), dtype=np.float64)
+        self.obs = np.zeros((T, N, self.input_dim), dtype=np.float32)          # network input
+        self.raw_obs = np.zeros((T, N, self.raw_obs_dim), dtype=np.float32)    # unscaled
+        self.sim_state = np.zeros((T, N, self.sim_state_dim), dtype=np.float64)
+        self.next_raw_obs = np.zeros((T, N, self.raw_obs_dim), dtype=np.float32)
+        self.next_sim_state = np.zeros((T, N, self.sim_state_dim), dtype=np.float64)
         self.actions = np.zeros((T, N), dtype=np.int64)
         self.logprobs = np.zeros((T, N), dtype=np.float32)
         self.probs = np.zeros((T, N, self.n_actions), dtype=np.float32)
@@ -105,10 +113,11 @@ class RolloutBuffer:
 
     # -- flattening --------------------------------------------------------- #
 
-    def flat_tensors(self, advantages: np.ndarray, returns: np.ndarray) -> dict[str, torch.Tensor]:
+    def flat_tensors(self, advantages: np.ndarray, returns: np.ndarray,
+                     q_cf: np.ndarray | None = None) -> dict[str, torch.Tensor]:
         d = self.device
         f = lambda a, dt: torch.as_tensor(a.reshape((-1,) + a.shape[2:]), dtype=dt, device=d)
-        return {
+        out = {
             "obs": f(self.obs, torch.float32),
             "actions": f(self.actions, torch.int64),
             "logprobs": f(self.logprobs, torch.float32),
@@ -116,6 +125,12 @@ class RolloutBuffer:
             "advantages": f(advantages, torch.float32),
             "returns": f(returns, torch.float32),
         }
+        if q_cf is not None:
+            # PPO-CF needs the all-action counterfactual values AND the
+            # behaviour policy that centred them. Both are per-(state, action).
+            out["q_cf"] = f(q_cf, torch.float32)
+            out["probs"] = f(self.probs, torch.float32)
+        return out
 
 
 AdvantageTransform = Callable[["RolloutBuffer", np.ndarray], np.ndarray]

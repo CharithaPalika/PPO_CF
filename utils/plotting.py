@@ -218,3 +218,224 @@ def plot_mc_comparison(land, figsize=(12, 3.8)):
         ax.spines[["top", "right"]].set_visible(False)
     fig.tight_layout()
     return fig
+
+
+# --------------------------------------------------------------------------- #
+# MiniGrid-specific views
+# --------------------------------------------------------------------------- #
+#
+# The simulator state packed by envs/minigrid_env.py is
+#     [ grid.encode().ravel() ,  agent_col, agent_row, agent_dir,
+#       carried_type, carried_color, step_count ]
+# so the last six entries are readable without decoding the grid.
+
+MG_COL, MG_ROW, MG_DIR, MG_CARRY = -6, -5, -4, -3
+
+
+def _bin_by_step(step: np.ndarray, values: np.ndarray, n_bins: int):
+    """Mean of `values` in `n_bins` equal-width bins of `step`."""
+    edges = np.linspace(step.min(), step.max() + 1, n_bins + 1)
+    idx = np.clip(np.digitize(step, edges) - 1, 0, n_bins - 1)
+    centres = 0.5 * (edges[:-1] + edges[1:])
+    out = np.full(n_bins, np.nan)
+    for b in range(n_bins):
+        m = idx == b
+        if m.any():
+            out[b] = values[m].mean()
+    return centres, out
+
+
+def minigrid_episode_progress(traj) -> pd.DataFrame:
+    """Per-episode sub-goal progress for DoorKey.
+
+    Success alone is a terrible progress signal on a sparse task: it sits at zero
+    for hundreds of thousands of frames while the policy is in fact getting
+    closer. DoorKey has a hard prerequisite -- the agent cannot possibly finish
+    without first picking up the key -- so `picked_up_key` moves long before
+    `success` does, and a run where neither moves is failing for a different
+    reason than a run where only `success` is flat.
+    """
+    d = traj.data
+    eid = d["episode_id"]
+    order = np.argsort(eid, kind="stable")
+    eid_s = eid[order]
+    carrying = (d["sim_state"][order, MG_CARRY] >= 0).astype(np.float64)
+    term = d["terminated"][order].astype(np.float64)
+    step = d["global_step"][order].astype(np.float64)
+
+    uniq, start = np.unique(eid_s, return_index=True)
+    end = np.append(start[1:], len(eid_s))
+    rows = []
+    for u, a, b in zip(uniq, start, end):
+        rows.append({
+            "episode_id": int(u),
+            "global_step": float(step[a]),
+            "picked_up_key": float(carrying[a:b].max()),
+            "success": float(term[a:b].max()),
+            "length": int(b - a),
+        })
+    return pd.DataFrame(rows)
+
+
+def plot_minigrid_progress(traj, n_bins: int = 25, figsize=(12, 3.8)):
+    prog = minigrid_episode_progress(traj)
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
+
+    for ax, key, title, color in [
+        (axes[0], "picked_up_key", "Episodes where the key was picked up", "#3b6ea5"),
+        (axes[1], "success", "Episodes solved", "#4f8a5b"),
+    ]:
+        x, y = _bin_by_step(prog["global_step"].to_numpy(), prog[key].to_numpy(), n_bins)
+        ax.plot(x, y, lw=1.8, color=color, marker="o", ms=3)
+        ax.set_ylim(-0.03, 1.03)
+        ax.set_xlabel("environment steps")
+        ax.set_ylabel("fraction of episodes")
+        ax.set_title(title, fontsize=10)
+
+    x, y = _bin_by_step(prog["global_step"].to_numpy(), prog["length"].to_numpy(), n_bins)
+    axes[2].plot(x, y, lw=1.8, color="#c4622d", marker="o", ms=3)
+    axes[2].set_xlabel("environment steps")
+    axes[2].set_ylabel("steps")
+    axes[2].set_title("Episode length", fontsize=10)
+
+    for ax in axes:
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.grid(axis="y", alpha=0.25)
+    fig.tight_layout()
+    return fig, prog
+
+
+def plot_action_usage(traj, action_names, n_bins: int = 25, figsize=(12, 4)):
+    """Mean pi(a) over training, per action.
+
+    Worth watching closely: on Taxi-v4 the policy drove pi(PICKUP) to 0.0016 and
+    pi(DROPOFF) below 0.007 while total entropy still read a healthy 1.23, which
+    made the failure invisible to every aggregate metric. A per-action view is
+    the only place that shows up.
+    """
+    d = traj.data
+    step = d["global_step"].astype(np.float64)
+    probs = d["probs"]
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
+
+    for a, name in enumerate(action_names):
+        x, y = _bin_by_step(step, probs[:, a], n_bins)
+        axes[0].plot(x, y, lw=1.5, label=name)
+    axes[0].axhline(1.0 / probs.shape[1], color="#888", ls=":", lw=1, label="uniform")
+    axes[0].set_xlabel("environment steps"); axes[0].set_ylabel("mean pi(a)")
+    axes[0].set_title("Action probability over training", fontsize=10)
+    axes[0].legend(frameon=False, fontsize=7, ncol=2)
+
+    taken = np.bincount(d["action"].astype(np.int64), minlength=probs.shape[1])
+    axes[1].bar(range(len(action_names)), taken / taken.sum(), color="#4f6d7a")
+    axes[1].set_xticks(range(len(action_names)))
+    axes[1].set_xticklabels(action_names, rotation=45, ha="right", fontsize=7)
+    axes[1].set_ylabel("fraction of steps")
+    axes[1].set_title("Actions actually taken (whole run)", fontsize=10)
+
+    for ax in axes:
+        ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+    return fig
+
+
+def plot_minigrid_visitation(traj, grid_shape=None, figsize=(12, 3.6)):
+    """`grid_shape=None` infers (W, H) from the packed sim_state width.
+
+    The state is [grid.encode().ravel() (W*H*3), col, row, dir, carry_type,
+    carry_color, step_count], so W*H = (len(sim_state) - 6) / 3, and MiniGrid
+    grids are square. Inferring it keeps this function correct across the
+    5x5 / 6x6 / 8x8 curriculum instead of silently mis-binning.
+    """
+    d = traj.data
+    col = d["sim_state"][:, MG_COL].astype(int)
+    row = d["sim_state"][:, MG_ROW].astype(int)
+    carrying = d["sim_state"][:, MG_CARRY] >= 0
+    if grid_shape is None:
+        n_cells = (d["sim_state"].shape[1] - 6) // 3
+        side = int(round(n_cells ** 0.5))
+        grid_shape = (side, side)
+    w, h = grid_shape
+
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
+    for ax, mask, title in [
+        (axes[0], np.ones(len(col), bool), "All steps"),
+        (axes[1], ~carrying, "Before key pickup"),
+        (axes[2], carrying, "Carrying the key"),
+    ]:
+        if mask.sum() == 0:
+            ax.text(0.5, 0.5, "no steps", ha="center", va="center", transform=ax.transAxes)
+            ax.set_title(title, fontsize=10)
+            continue
+        grid = np.zeros((h, w))
+        np.add.at(grid, (row[mask], col[mask]), 1.0)
+        im = ax.imshow(grid / grid.sum(), cmap="viridis", origin="upper")
+        plt.colorbar(im, ax=ax, label="visit fraction")
+        ax.set_title(f"{title}  ({int(mask.sum()):,} steps)", fontsize=10)
+        ax.set_xlabel("col"); ax.set_ylabel("row")
+    fig.tight_layout()
+    return fig
+
+
+def plot_subgoal_ladder(scalars: dict, figsize=(13, 3.8)):
+    """key_rate -> door_rate -> success_rate, from scalars.csv.
+
+    On a sparse task success rate is a terrible progress signal: it can sit at
+    exactly zero for millions of frames while the policy is either improving or
+    dying, and the two look identical. DoorKey has hard prerequisites -- no goal
+    without an open door, no open door without the key -- so the ladder says
+    WHICH rung the policy is stuck on, and the rungs need opposite responses:
+
+        all three flat            -> no signal at all; check adv_std_raw
+        key rising, door flat     -> stuck at the door (toggle suppressed, or
+                                     the door is never approached with the key)
+        door rising, success flat -> stuck between the door and the goal;
+                                     usually just undertrained
+    """
+    fig, axes = plt.subplots(1, 3, figsize=figsize, sharey=True)
+    panels = [("key_rate_100", "Picked up the key", "#3b6ea5"),
+              ("door_rate_100", "Opened the door", "#8a6d3b"),
+              ("success_rate_100", "Solved", "#4f8a5b")]
+    for ax, (key, title, color) in zip(axes, panels):
+        for s, d in scalars.items():
+            if key not in d.columns:
+                continue
+            ax.plot(d["global_step"], d[key], lw=1.5, color=color, label=f"seed {s}")
+        ax.set_ylim(-0.03, 1.03)
+        ax.set_xlabel("environment steps")
+        ax.set_title(title, fontsize=10)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.grid(axis="y", alpha=0.25)
+    axes[0].set_ylabel("fraction of last 100 episodes")
+    fig.tight_layout()
+    return fig
+
+
+def plot_signal_diagnostics(scalars: dict, figsize=(13, 3.8)):
+    """adv_std_raw, explained_variance and entropy on one row.
+
+    `adv_std_raw` is the spread of the advantages BEFORE whitening. It answers
+    the question every other diagnostic confounds: was there anything to learn
+    from this rollout? If it sits at the `norm_adv_min_std` floor, the policy is
+    not learning slowly -- it is receiving no signal, and any movement in
+    entropy, approx_kl or clipfrac during that stretch is numerical noise.
+    """
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
+    for s, d in scalars.items():
+        if "adv_std_raw" in d.columns:
+            axes[0].semilogy(d["global_step"], d["adv_std_raw"].clip(lower=1e-20),
+                             lw=1.4, label=f"seed {s}")
+        axes[1].plot(d["global_step"], d["explained_variance"], lw=1.4, label=f"seed {s}")
+        axes[2].plot(d["global_step"], d["entropy"], lw=1.4, label=f"seed {s}")
+    for ax, title, ylab in [
+        (axes[0], "Advantage spread (raw)", "std before whitening"),
+        (axes[1], "Explained variance", "EV"),
+        (axes[2], "Policy entropy", "nats"),
+    ]:
+        ax.set_title(title, fontsize=10)
+        ax.set_xlabel("environment steps")
+        ax.set_ylabel(ylab)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.grid(axis="y", alpha=0.25)
+    fig.tight_layout()
+    return fig

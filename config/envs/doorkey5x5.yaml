@@ -1,0 +1,81 @@
+# MiniGrid-DoorKey-5x5-v0 -- rung 1 of the curriculum.
+#
+# WHY THIS IS RUNG 1. DoorKey-8x8 with random layouts asks PPO to generalise
+# across layouts before it has ever seen a reward; the 3M-frame run stayed at
+# the 2.1% uniform-random success rate for its whole length and the critic
+# converged to V = 0 everywhere. 5x5 has a 25-cell grid, a 250-step limit and a
+# much higher random-success rate, so the critic gets differentiated returns
+# within the first few thousand frames. Get the pipeline visibly learning here
+# before spending frames on 8x8.
+#
+# EXPECTATION. This should solve. If success_rate_100 is not clearly above 0.5
+# by ~300k frames, the problem is the algorithm or the configuration, not the
+# environment -- do not move up a rung until this one works.
+
+env:
+  env_id: MiniGrid-DoorKey-5x5-v0
+  n_envs: 16
+  max_episode_steps: null      # MiniGrid sets its own (10 * size^2 = 250)
+  obs_norm: image
+  fully_observable: true       # required for the oracle: A_CF needs an MDP
+  layout_seeds: null           # random layout every episode
+  layout_seed_mode: cycle
+
+ppo:
+  total_timesteps: 500000
+  n_steps: 128                 # 16 x 128 = 2048 per rollout
+  n_epochs: 4
+  n_minibatches: 8             # -> minibatch 256
+  learning_rate: 0.001
+  anneal_lr: false
+  optim_eps: 1.0e-8
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_coef: 0.2
+  clip_vloss: true
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: null
+
+  norm_adv: batch
+  norm_adv_min_std: 1.0e-06
+
+  ent_mode: fixed
+  prob_floor_start: 0.0
+  prob_floor_end: 0.0
+
+  encoder: cnn
+  share_encoder: true          # what rl-starter-files does
+  hidden_sizes: [64]
+  activation: tanh
+  separate_grad_clip: false    # ignored when share_encoder is true
+  device: cpu
+
+run:
+  run_name: doorkey5x5
+  seeds: [0]
+  trajectory_stride: 4
+  compact_trajectory_dtypes: true
+  log_every_updates: 10
+  record_trajectories: true
+  eval_every_updates: 0
+  eval_episodes: 20
+  init_from: null
+
+reward:
+  potential_shaping: false
+  potential_key: 0.0
+  potential_door: 0.0
+  count_bonus_coef: 0.0
+
+oracle:
+  checkpoint_fraction: 0.75
+
+note: |
+  7 actions (log 7 = 1.946 nats). Reward is 1 - 0.9*(steps/max_steps) on
+  success, 0 otherwise, so mean return and success rate carry nearly the same
+  information; return additionally rewards finishing faster.
+  `pickup` (3) and `toggle` (5) are mandatory; `drop` (4) and `done` (6) are
+  useless. If pi(pickup) or pi(toggle) decays below ~0.01 the run cannot
+  succeed no matter how long it trains -- that is what prob_floor_start is for.

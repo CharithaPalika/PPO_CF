@@ -1,0 +1,81 @@
+# Taxi-v4 -- evaluated and abandoned. Kept because its failure mode is the one
+# most likely to recur on DoorKey, and the configuration that defends against
+# it is here.
+#
+# THE TRAP. Measured random-policy success (2000 episodes, 200-step limit):
+#   uniform over all 6 actions   94/2000  (4.7%)  <- ample signal
+#   random movement only, no 4/5  0/2000  (0.0%)  <- the trap
+# An illegal pickup costs -10 while doing nothing costs -1, so the policy
+# learns to never use pickup/dropoff. After 1M steps the mean policy entropy
+# read a healthy 1.231 of log 6 = 1.792 -- while pi(PICKUP) averaged 0.0016 and
+# pi(DROPOFF) peaked at 0.007 across all 500 states. EVERY AGGREGATE METRIC
+# LOOKED FINE. Entropy is maximised just as well by spreading mass over the
+# four movement actions, so the failure is invisible to any global measure.
+#
+# That is why `prob_floor_start` exists: pi = (1-eps)*softmax + eps/K puts a
+# hard floor under every action, which entropy regularisation cannot express.
+# DoorKey has the same structure (pickup and toggle are mandatory), so watch
+# the per-action panel there, not just entropy.
+
+env:
+  env_id: Taxi-v4
+  n_envs: 16
+  max_episode_steps: 200       # the registered limit; keep it
+  obs_norm: onehot             # Discrete(500); the requested kind is overridden
+  layout_seeds: null
+
+ppo:
+  total_timesteps: 1000000
+  n_steps: 64
+  n_epochs: 4
+  n_minibatches: 4
+  learning_rate: 0.0007
+  anneal_lr: true
+  optim_eps: 1.0e-05
+  gamma: 0.99
+  gae_lambda: 0.98
+  clip_coef: 0.2
+  clip_vloss: true
+  ent_coef: 0.003
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: null
+
+  norm_adv: minibatch
+  norm_adv_min_std: 1.0e-06
+
+  ent_mode: adaptive
+  target_entropy_frac_start: 0.90
+  target_entropy_frac_end: 0.02
+  ent_anneal_full_rate: 0.80
+  prob_floor_start: 0.20
+  prob_floor_end: 0.01
+
+  encoder: mlp
+  share_encoder: false
+  hidden_sizes: [64, 64]
+  activation: tanh
+  separate_grad_clip: true
+  device: cpu
+
+run:
+  run_name: taxi_baseline
+  seeds: [0]
+  trajectory_stride: 1
+  compact_trajectory_dtypes: true
+  log_every_updates: 10
+  record_trajectories: true
+
+reward:
+  potential_shaping: false
+  count_bonus_coef: 0.0
+
+oracle:
+  checkpoint_fraction: 0.75
+
+note: |
+  Deterministic only with is_rainy=False and fickle_passenger=False, which are
+  the defaults but are constructor arguments -- envs.env_pool.assert_deterministic
+  checks rather than assumes. Credit assignment, not exploration, is the
+  difficulty: the -10 penalty differentiates actions from the first step, so
+  the critic is informative immediately rather than sitting at -1/(1-gamma).

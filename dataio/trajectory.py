@@ -65,9 +65,27 @@ FIELDS = {
 # Recorder
 # --------------------------------------------------------------------------- #
 
+#: Narrow dtypes for environments whose observations and simulator states are
+#: small integers. This is a memory necessity, not a micro-optimisation: a
+#: 1M-step MiniGrid run at the default widths is
+#:     (192 + 192) * 4 B  +  (198 + 198) * 8 B  ~= 4.7 KB/row  ->  4.7 GB in RAM
+#: before anything is written to disk. Compact dtypes plus a stride of 4 bring
+#: that to ~300 MB. Grid codes fit in uint8; MiniGrid's step_count (up to 640 on
+#: DoorKey-8x8) needs int16.
+COMPACT_FIELDS = dict(FIELDS)
+COMPACT_FIELDS.update({
+    "raw_obs": np.uint8,
+    "next_raw_obs": np.uint8,
+    "sim_state": np.int16,
+    "next_sim_state": np.int16,
+})
+
+
 class TrajectoryRecorder:
-    def __init__(self, stride: int = 1):
+    def __init__(self, stride: int = 1, compact: bool = False):
         self.stride = max(1, int(stride))
+        self.dtypes = COMPACT_FIELDS if compact else FIELDS
+        self.compact = compact
         self._chunks: dict[str, list[np.ndarray]] = {k: [] for k in FIELDS}
         self._seen = 0
 
@@ -102,7 +120,7 @@ class TrajectoryRecorder:
             flat = arr.reshape((-1,) + arr.shape[2:])
             if self.stride > 1:
                 flat = flat[:: self.stride]
-            self._chunks[k].append(flat.astype(FIELDS[k], copy=False))
+            self._chunks[k].append(flat.astype(self.dtypes[k], copy=False))
 
         self._seen += T * n_envs
 
@@ -114,6 +132,7 @@ class TrajectoryRecorder:
         path.parent.mkdir(parents=True, exist_ok=True)
         data = self.finalize()
         data["_schema_version"] = np.array([SCHEMA_VERSION], dtype=np.int32)
+        data["_meta_compact_dtypes"] = np.array(int(self.compact), dtype=np.int32)
         if meta:
             for k, v in meta.items():
                 data[f"_meta_{k}"] = np.array(v)
@@ -188,7 +207,7 @@ def validate(traj: Trajectories, n_actions: int, verbose: bool = True) -> list[s
     def bad(msg: str) -> None:
         problems.append(msg)
 
-    for k, dt in FIELDS.items():
+    for k, _dt in FIELDS.items():
         if k not in d:
             bad(f"missing field: {k}")
         elif len(d[k]) != n:
@@ -249,7 +268,7 @@ def validate(traj: Trajectories, n_actions: int, verbose: bool = True) -> list[s
         n_succ = int(d["terminated"].sum())
         print(f"  rows            {n:,}")
         print(f"  episodes        {n_ep:,}")
-        print(f"  terminated rows {n_succ:,}   (MountainCar: goal reached)")
+        print(f"  terminated rows {n_succ:,}   (MDP termination = task solved)")
         print(f"  truncated rows  {int(d['truncated'].sum()):,}")
         print(f"  problems        {len(problems)}")
 

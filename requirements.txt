@@ -1,11 +1,16 @@
-# Notebook 01. Versions are the ones this was developed and validated against;
-# nearby versions are fine. gymnasium >= 1.0 changed vector-env autoreset
-# semantics, which is why envs/env_pool.py implements its own pool.
+# Versions this was developed and validated against; nearby versions are fine.
+# gymnasium >= 1.0 changed vector-env autoreset semantics, which is why
+# envs/env_pool.py implements its own pool.
 torch>=2.2
 gymnasium>=1.0
 numpy>=1.26
 pandas>=2.0
 matplotlib>=3.8
+pyyaml>=6.0            # config/envs/*.yaml
+
+# MiniGrid-DoorKey-*. gymnasium 1.3 registers Taxi-v4 (v3 is gone).
+minigrid>=3.0
+
 # NB04/NB05 will additionally need:
 scipy>=1.11
 scikit-learn>=1.4

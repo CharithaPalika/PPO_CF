@@ -110,7 +110,7 @@ class PPOTrainer:
         # --- PPO-CF: the counterfactual oracle, evaluated every rollout ----- #
         self.oracle = None
         self._cf_validated = True
-        if cfg.ppo.pg_mode == "cf_all_action":
+        if cfg.ppo.pg_mode.startswith("cf"):
             from oracle.online import OnlineOracle
             self.oracle = OnlineOracle(
                 cfg.env.env_id, self.pool.n_actions, cfg.ppo.gamma,
@@ -118,6 +118,7 @@ class PPOTrainer:
                 restore=cfg.ppo.cf_restore, seed=seed,
             )
             self._cf_validated = not cfg.ppo.cf_validate
+            self._cf_rng = np.random.default_rng(seed + 7919)
         # The oracle restores simulator states, so they must be captured even
         # when no trajectory dataset is being written.
         self._needs_sim_state = self.recorder is not None or self.oracle is not None
@@ -212,20 +213,54 @@ class PPOTrainer:
 
     # ---------------------------------------------------- counterfactuals #
 
-    def compute_counterfactual(self) -> np.ndarray:
-        """(T, N, K) Q_CF for every state in the rollout, under the LIVE critic.
+    @torch.no_grad()
+    def _probs_np(self, raw: np.ndarray) -> np.ndarray:
+        x = torch.as_tensor(self._scale(raw), dtype=torch.float32, device=self.device)
+        return self.model.action_probs(x).cpu().numpy()
 
-        All T*N states are handed to the oracle in one call so the critic is
-        evaluated on all T*N*K successors in a single batched forward pass.
-        The environment work dominates regardless: K restores + K steps per
-        collected transition.
+    def compute_counterfactual(self) -> tuple[np.ndarray, np.ndarray, dict]:
+        """Q_g on a SUBSAMPLE of rollout states. Returns (q, mask, diagnostics).
+
+        `q` is (B, K) with rows outside the subsample left at zero; `mask` says
+        which rows are real. Subsampling is forced by cost: Eq (3) needs
+        K * cf_rollouts branches of up to cf_horizon steps PER STATE, so
+        computing it for all 2048 rollout states would be ~40x slower than
+        training. The alpha blend applies the counterfactual loss only on the
+        masked rows and plain PPO everywhere, which is what makes a 5% sample
+        affordable.
         """
-        T, N = self.cfg.ppo.n_steps, self.cfg.env.n_envs
-        sims = self.buffer.sim_state[:T].reshape(T * N, -1)
-        q = self.oracle.q_cf(sims, self._values_np)
-        return q.reshape(T, N, self.pool.n_actions)
+        cfg = self.cfg.ppo
+        T, N = cfg.n_steps, self.cfg.env.n_envs
+        B = T * N
+        sims = self.buffer.sim_state[:T].reshape(B, -1)
 
-    def _validate_oracle(self, q_cf: np.ndarray, n_sample: int = 96) -> None:
+        n_sub = max(1, int(round(cfg.cf_subsample * B)))
+        idx = self._cf_rng.choice(B, size=n_sub, replace=False)
+
+        q_sub, diag = self.oracle.q_g(
+            sims[idx], self._probs_np, self._values_np,
+            horizon=cfg.cf_horizon, n_rollouts=cfg.cf_rollouts,
+            seed=int(self._cf_rng.integers(1 << 30)),
+            bootstrap_tail=cfg.cf_bootstrap_tail, chunk=cfg.cf_branch_envs,
+        )
+
+        q = np.zeros((B, self.pool.n_actions), dtype=np.float32)
+        mask = np.zeros(B, dtype=bool)
+        q[idx] = q_sub
+        mask[idx] = True
+
+        if cfg.pg_mode == "cf_shuffled":
+            # The plan's P1 control: same oracle vectors, different states. If
+            # this reproduces the benefit, the benefit was not counterfactual
+            # information -- it was the extra gradient structure.
+            perm = self._cf_rng.permutation(n_sub)
+            q[idx] = q_sub[perm]
+
+        diag["n_cf_states"] = n_sub
+        return q, mask, diag
+
+    def _validate_oracle(self, q_cf: np.ndarray, mask: np.ndarray,
+                         n_sample: int = 96) -> None:
         """Run once, on the first rollout. Cheap, and the failure it catches is
         otherwise undetectable: a broken restore produces A_CF values that look
         entirely reasonable and are wrong."""
@@ -236,10 +271,9 @@ class PPOTrainer:
         rng = np.random.default_rng(self.seed)
         idx = rng.choice(T * N, size=min(n_sample, T * N), replace=False)
 
-        centering = check_centering(
-            (q_cf - (self.buffer.probs[:T] * q_cf).sum(-1, keepdims=True)).reshape(T * N, -1),
-            flat(self.buffer.probs),
-        )
+        probs = flat(self.buffer.probs)[mask]
+        q_m = q_cf[mask]
+        centering = check_centering(q_m - (probs * q_m).sum(-1, keepdims=True), probs)
         if not centering["ok"]:
             raise RuntimeError(
                 f"A_CF is not policy-centred: max |sum_a pi*A_CF| = "
@@ -323,29 +357,12 @@ class PPOTrainer:
         return (adv - adv.mean()) / (std + 1e-8), std
 
     def update(self, advantages: np.ndarray, returns: np.ndarray,
-               q_cf: np.ndarray | None = None) -> dict[str, float]:
+               q_cf: np.ndarray | None = None,
+               cf_mask: np.ndarray | None = None) -> dict[str, float]:
         cfg = self.cfg
-        cf = cfg.ppo.pg_mode == "cf_all_action"
+        cf = cfg.ppo.pg_mode.startswith("cf") and q_cf is not None
         t = self.buffer.flat_tensors(advantages, returns, q_cf if cf else None)
         idx = np.arange(self.batch)
-
-        # --- counterfactual advantages, centred on the BEHAVIOUR policy ---- #
-        # A_CF(s,a) = Q_CF(s,a) - sum_b pi_old(b|s) Q_CF(s,b), so that
-        # sum_a pi_old(a|s) A_CF(s,a) = 0 exactly, per state. That identity is
-        # what makes the all-action gradient unbiased w.r.t. action sampling,
-        # so the scaling below is SCALE-ONLY -- subtracting a batch mean would
-        # destroy it. The scale is the RMS of the pi-weighted advantage.
-        cf_scale = 1.0
-        cf_centering = float("nan")
-        if cf:
-            v_pi = (t["probs"] * t["q_cf"]).sum(-1, keepdim=True)
-            t["a_cf"] = t["q_cf"] - v_pi
-            with torch.no_grad():
-                rms = float(torch.sqrt((t["probs"] * t["a_cf"] ** 2).sum(-1).mean()))
-                cf_scale = rms if rms > cfg.ppo.norm_adv_min_std else 1.0
-                cf_centering = float((t["probs"] * t["a_cf"]).sum(-1).abs().max())
-                cf_mean_abs = float(t["a_cf"].abs().mean())
-            t["a_cf"] = t["a_cf"] / cf_scale
 
         # Advantage normalisation scope. "batch" whitens once over the whole
         # rollout, which preserves the RELATIVE size of advantages between
@@ -357,6 +374,38 @@ class PPOTrainer:
             t["advantages"], adv_std_raw = self._normalise(
                 t["advantages"], cfg.ppo.norm_adv_min_std
             )
+
+        # --- counterfactual advantages, centred on the BEHAVIOUR policy ---- #
+        # Eq (4): A_CF(s,a) = Q_g(s,a) - sum_b pi_old(b|s) Q_g(s,b), so that
+        # sum_a pi_old(a|s) A_CF(s,a) = 0 exactly, per state. That identity is
+        # what makes the all-action gradient unbiased w.r.t. action sampling,
+        # so the scaling below is SCALE-ONLY -- subtracting a batch mean would
+        # destroy it.
+        #
+        # SCALE. Plan rule 4 requires identical advantage-scale conventions
+        # across the paired arms, and Eq (6) adds L_PPO and L_CF together, so
+        # they must live in the same units. A_CF is therefore divided by the
+        # SAME number the GAE advantages were divided by -- not by its own RMS.
+        # Whitening A_CF separately inflates a weak counterfactual signal to
+        # full gradient strength, which is the same failure as the original
+        # advantage-normalisation bug.
+        cf_centering = cf_mean_abs = cf_corr_gae = float("nan")
+        cf_frac = 0.0
+        if cf:
+            t["cf_mask"] = torch.as_tensor(cf_mask, dtype=torch.bool, device=self.device)
+            v_pi = (t["probs"] * t["q_cf"]).sum(-1, keepdim=True)
+            a_cf = (t["q_cf"] - v_pi) / max(adv_std_raw, cfg.ppo.norm_adv_min_std)
+            a_cf = a_cf * t["cf_mask"][:, None]
+            t["a_cf"] = a_cf
+            with torch.no_grad():
+                m = t["cf_mask"]
+                cf_frac = float(m.float().mean())
+                cf_centering = float((t["probs"][m] * a_cf[m]).sum(-1).abs().max())
+                cf_mean_abs = float(a_cf[m].abs().mean())
+                taken = a_cf[m].gather(1, t["actions"][m, None]).squeeze(1)
+                g_adv = t["advantages"][m]
+                if len(taken) > 2 and float(taken.std()) > 0 and float(g_adv.std()) > 0:
+                    cf_corr_gae = float(torch.corrcoef(torch.stack([taken, g_adv]))[0, 1])
 
         clipfracs: list[float] = []
         approx_kls: list[float] = []
@@ -373,27 +422,28 @@ class PPOTrainer:
                 mb = idx[start : start + self.minibatch]
 
                 if cf:
-                    # ---- all-action counterfactual policy gradient -------- #
-                    #   L = -sum_a pi_old(a|s) * min( rho_a A, clip(rho_a) A )
-                    # with rho_a = pi_theta(a|s) / pi_old(a|s). Unclipped this
-                    # is exactly  -sum_a pi_theta(a|s) A_CF(s,a): every action
-                    # contributes to the gradient weighted by its probability,
-                    # so the variance from ACTION SAMPLING is gone entirely.
-                    # That is the whole point of the oracle -- substituting
-                    # A_CF(s, a_taken) for the GAE advantage instead would just
-                    # be GAE with lambda = 0.
+                    # ---- Eq (5): all-action counterfactual surrogate ------- #
+                    #   L_CF = -mean_s sum_a pi_old(a|s)
+                    #            min( rho_a A_CF, clip(rho_a, 1+-eps) A_CF )
+                    # with rho_a = pi_theta(a|s) / pi_old(a|s). Every action
+                    # contributes weighted by its probability, so the variance
+                    # from ACTION SAMPLING is gone. Only defined on the
+                    # subsampled rows; plain PPO carries the rest.
                     logp_all, entropy, newvalue = self.model.evaluate_all_actions(t["obs"][mb])
-                    pi_b = t["probs"][mb]
-                    a_cf = t["a_cf"][mb]
-                    ratio_all = (logp_all - torch.log(pi_b.clamp_min(1e-12))).exp()
-                    surr = torch.min(
-                        ratio_all * a_cf,
-                        torch.clamp(ratio_all, 1 - cfg.ppo.clip_coef, 1 + cfg.ppo.clip_coef) * a_cf,
-                    )
-                    pg_loss = -(pi_b * surr).sum(-1).mean()
-                    # Diagnostics stay on the TAKEN action so approx_kl and
-                    # clipfrac mean the same thing in both arms.
                     newlogprob = logp_all.gather(1, t["actions"][mb, None]).squeeze(1)
+                    m = t["cf_mask"][mb]
+                    if bool(m.any()):
+                        pi_b = t["probs"][mb][m]
+                        a_cf_mb = t["a_cf"][mb][m]
+                        ratio_all = (logp_all[m] - torch.log(pi_b.clamp_min(1e-12))).exp()
+                        surr = torch.min(
+                            ratio_all * a_cf_mb,
+                            torch.clamp(ratio_all, 1 - cfg.ppo.clip_coef,
+                                        1 + cfg.ppo.clip_coef) * a_cf_mb,
+                        )
+                        cf_row = -(pi_b * surr).sum(-1)      # per-row, not meaned
+                    else:
+                        cf_row = None
                 else:
                     newlogprob, entropy, newvalue = self.model.evaluate_actions(
                         t["obs"][mb], t["actions"][mb]
@@ -409,15 +459,33 @@ class PPOTrainer:
                         ((ratio - 1.0).abs() > cfg.ppo.clip_coef).float().mean().item()
                     )
 
-                if not cf:
-                    mb_adv = t["advantages"][mb]
-                    if cfg.ppo.norm_adv == "minibatch":
-                        mb_adv, _ = self._normalise(mb_adv, cfg.ppo.norm_adv_min_std)
+                mb_adv = t["advantages"][mb]
+                if cfg.ppo.norm_adv == "minibatch":
+                    mb_adv, _ = self._normalise(mb_adv, cfg.ppo.norm_adv_min_std)
 
-                    pg_loss = torch.max(
-                        -mb_adv * ratio,
-                        -mb_adv * torch.clamp(ratio, 1 - cfg.ppo.clip_coef, 1 + cfg.ppo.clip_coef),
-                    ).mean()
+                ppo_row = torch.max(
+                    -mb_adv * ratio,
+                    -mb_adv * torch.clamp(ratio, 1 - cfg.ppo.clip_coef, 1 + cfg.ppo.clip_coef),
+                )
+
+                # Eq (6): L_actor = (1 - alpha) L_PPO + alpha L_CF, alpha = 0.5.
+                # alpha = 1.0 (pure replacement) is NOT the specification, and it
+                # is what made the first PPO-CF run degrade monotonically.
+                #
+                # The blend is applied PER ROW, only where a counterfactual
+                # exists. Eq (5) averages L_CF over the whole batch; we can only
+                # afford it on a subsample, and blending globally would instead
+                # halve the PPO term on every row while the counterfactual
+                # informed 5% of them -- handicapping the treatment arm relative
+                # to the control for a reason that has nothing to do with the
+                # hypothesis. Rows without a counterfactual get plain PPO, so
+                # the two arms are identical wherever the oracle is silent.
+                if cf and cf_row is not None:
+                    row = ppo_row.clone()
+                    row[m] = (1.0 - cfg.ppo.cf_alpha) * ppo_row[m] + cfg.ppo.cf_alpha * cf_row
+                    pg_loss = row.mean()
+                else:
+                    pg_loss = ppo_row.mean()
 
                 if cfg.ppo.clip_vloss:
                     v_unclipped = (newvalue - t["returns"][mb]) ** 2
@@ -476,9 +544,14 @@ class PPOTrainer:
             # PPO-CF only. cf_centering must stay at floating-point zero; if it
             # drifts, the all-action gradient has acquired a state-dependent
             # bias and the run is invalid.
-            "cf_scale": float(cf_scale) if cf else float("nan"),
-            "cf_centering": cf_centering if cf else float("nan"),
-            "cf_mean_abs": float(cf_mean_abs) if cf else float("nan"),
+            "cf_centering": cf_centering,
+            "cf_mean_abs": cf_mean_abs,
+            # Correlation between A_CF on the taken action and the GAE
+            # advantage. Near zero means the counterfactual estimate carries no
+            # information the sampled advantage does not -- the symptom that
+            # killed the one-step version (measured 0.098).
+            "cf_corr_gae": cf_corr_gae,
+            "cf_frac_states": cf_frac,
         }
 
     # ------------------------------------------------------------------- train #
@@ -645,14 +718,16 @@ class PPOTrainer:
             if self.recorder is not None:
                 self.recorder.add_rollout(self.buffer, gstep_start, cfg.env.n_envs)
 
-            q_cf = None
+            q_cf = cf_mask = None
+            cf_diag = {}
             if self.oracle is not None:
-                q_cf = self.compute_counterfactual()
+                q_cf, cf_mask, cf_diag = self.compute_counterfactual()
                 if not self._cf_validated:
-                    self._validate_oracle(q_cf)
+                    self._validate_oracle(q_cf, cf_mask)
                     self._cf_validated = True
 
-            stats = self.update(adv, ret, q_cf)
+            stats = self.update(adv, ret, q_cf, cf_mask)
+            stats.update({f"cf_{k}": float(v) for k, v in cf_diag.items()})
             self._update_schedules(stats["entropy"], update)
             self._maybe_checkpoint()
 

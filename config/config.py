@@ -181,7 +181,29 @@ class PPOConfig:
     # Cost: K restores + K env steps per collected transition. Measured on
     # DoorKey-5x5 (K=7): ~220 collected steps/s with cf_restore="exact",
     # ~380 with "fast", against ~1,900 for plain PPO.
+    # "cf_shuffled" is the plan's P1 control arm: the same oracle vectors are
+    # assigned to DIFFERENT batch states. If it reproduces the benefit, the
+    # benefit was never counterfactual information.
     pg_mode: str = "gae"
+    # Eq (6): L_actor = (1 - alpha) * L_PPO + alpha * L_CF. The plan fixes 0.5.
+    # alpha = 1.0 (pure replacement) is NOT the specification, and it is what
+    # made the first PPO-CF run degrade monotonically.
+    cf_alpha: float = 0.5
+    # --- Eq (3) rollout estimator ----------------------------------------- #
+    # Q_g is the discounted return after FORCING a, then following pi. It is
+    # estimated by branching from saved simulator states: K * cf_rollouts
+    # branches of up to cf_horizon steps, per counterfactual state, with common
+    # random numbers across actions and a critic bootstrap on the tail.
+    #
+    # Cost forces subsampling. Measured on DoorKey-5x5 (K=7, restore="fast"):
+    # a branch of H=16 costs ~2.8 ms, so a state costs K*R*2.8 ms. At
+    # cf_subsample 0.05, H=16, R=2 the arm runs ~400 steps/s against ~2,250 for
+    # plain PPO -- about 10 min/seed at 250k frames.
+    cf_horizon: int = 16
+    cf_rollouts: int = 2
+    cf_subsample: float = 0.10     # fraction of rollout states given a counterfactual
+    cf_bootstrap_tail: bool = True
+    cf_branch_envs: int = 256      # branches stepped in lockstep per batched policy call
     # "exact" restores via envs.env_pool.set_sim_state, the path NB02 validated.
     # "fast" skips the env.reset() inside it (~2x quicker, MiniGrid only);
     # oracle.online.check_restore_equivalence asserts the two are identical.
@@ -352,8 +374,10 @@ class ExperimentConfig:
             f"prob floor         {self.ppo.prob_floor_start} -> {self.ppo.prob_floor_end}  (0 = off)",
             f"adv norm           {self.ppo.norm_adv}  (min_std {self.ppo.norm_adv_min_std:g})",
             f"policy gradient    {self.ppo.pg_mode}"
-            + (f"  (oracle restore={self.ppo.cf_restore}, validate={self.ppo.cf_validate})"
-               if self.ppo.pg_mode == "cf_all_action" else ""),
+            + (f"  alpha={self.ppo.cf_alpha}, Q_g horizon={self.ppo.cf_horizon} "
+               f"x{self.ppo.cf_rollouts} rollouts, subsample={self.ppo.cf_subsample:.0%}, "
+               f"restore={self.ppo.cf_restore}"
+               if self.ppo.pg_mode.startswith("cf") else ""),
             f"reward shaping     {'on' if self.reward.active else 'off'}",
             f"warm start         {self.run.init_from or 'none'}",
             f"seeds              {list(self.run.seeds)}",
@@ -423,7 +447,17 @@ def _coerce(cls, values: dict) -> dict:
     out = {}
     for k, v in values.items():
         if k not in types:
-            raise KeyError(f"{cls.__name__} has no field {k!r}")
+            # Almost always a STALE JUPYTER KERNEL: the YAML on disk is read
+            # fresh on every call, but `config.py` was imported once and Python
+            # does not re-execute a module on re-import. So a field added to
+            # the dataclass after the kernel started is missing here while the
+            # YAML already uses it.
+            raise KeyError(
+                f"{cls.__name__} has no field {k!r}. If you just edited "
+                f"config/config.py, RESTART THE KERNEL -- the imported class is "
+                f"stale while the YAML is read from disk. Known fields: "
+                f"{sorted(types)}"
+            )
         if isinstance(v, list):
             v = tuple(v)
         out[k] = v
@@ -462,8 +496,13 @@ def _validate(cfg: ExperimentConfig) -> None:
         raise ValueError(f"total_timesteps {cfg.ppo.total_timesteps} < one batch ({b})")
     if cfg.ppo.norm_adv not in ("minibatch", "batch", "none"):
         raise ValueError(f"norm_adv must be minibatch|batch|none, got {cfg.ppo.norm_adv!r}")
-    if cfg.ppo.pg_mode not in ("gae", "cf_all_action"):
-        raise ValueError(f"pg_mode must be gae|cf_all_action, got {cfg.ppo.pg_mode!r}")
+    if cfg.ppo.pg_mode not in ("gae", "cf_all_action", "cf_shuffled"):
+        raise ValueError(
+            f"pg_mode must be gae|cf_all_action|cf_shuffled, got {cfg.ppo.pg_mode!r}")
+    if not 0.0 <= cfg.ppo.cf_alpha <= 1.0:
+        raise ValueError(f"cf_alpha must be in [0, 1], got {cfg.ppo.cf_alpha}")
+    if not 0.0 < cfg.ppo.cf_subsample <= 1.0:
+        raise ValueError(f"cf_subsample must be in (0, 1], got {cfg.ppo.cf_subsample}")
     if cfg.ppo.cf_restore not in ("exact", "fast"):
         raise ValueError(f"cf_restore must be exact|fast, got {cfg.ppo.cf_restore!r}")
     if cfg.ppo.pg_mode == "cf_all_action" and cfg.reward.active:

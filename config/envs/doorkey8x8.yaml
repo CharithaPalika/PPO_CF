@@ -87,7 +87,7 @@ run:
   record_trajectories: true
   eval_every_updates: 0
   eval_episodes: 20
-  init_from: runs/doorkey6x6/seed_{seed}/checkpoints/ckpt_100.pt
+  init_from: null #runs/doorkey6x6/seed_{seed}/checkpoints/ckpt_100.pt
 
 reward:
   # Both off by default. Potential shaping is oracle-safe (V_true = V_shaped +

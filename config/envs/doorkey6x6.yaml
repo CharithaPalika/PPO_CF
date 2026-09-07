@@ -59,7 +59,7 @@ run:
   record_trajectories: true
   eval_every_updates: 0
   eval_episodes: 20
-  init_from: runs/doorkey5x5/seed_{seed}/checkpoints/ckpt_100.pt
+  init_from: None #runs/doorkey5x5/seed_{seed}/checkpoints/ckpt_100.pt
 
 reward:
   potential_shaping: false

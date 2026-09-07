@@ -66,7 +66,9 @@ class OnlineOracle:
         self.n_actions = int(n_actions)
         self.gamma = float(gamma)
         self.restore = restore
-        self.env = make_env(env_id, max_episode_steps, **(env_kwargs or {}))
+        self._env_kwargs = dict(env_kwargs or {})
+        self._max_steps = max_episode_steps
+        self.env = make_env(env_id, max_episode_steps, **self._env_kwargs)
         self.env.reset(seed=seed)          # allocate grid / internal buffers once
         self.obs_dim = int(np.prod(self.env.observation_space.shape))
         self._is_minigrid = env_id.startswith("MiniGrid")
@@ -81,15 +83,18 @@ class OnlineOracle:
         return int(round(float(sim_state[-1])))
 
     def _restore(self, sim_state: np.ndarray) -> None:
+        self._restore_into(self.env, sim_state)
+
+    def _restore_into(self, env, sim_state: np.ndarray) -> None:
         elapsed = self._step_count_of(sim_state) if self._is_minigrid else 0
         if self.restore == "exact":
-            set_sim_state(self.env, sim_state, elapsed_steps=elapsed)
+            set_sim_state(env, sim_state, elapsed_steps=elapsed)
             return
         # fast: skip the env.reset() that set_sim_state does before every restore
         from envs.minigrid_env import set_minigrid_state
-        set_minigrid_state(self.env, sim_state, elapsed_steps=elapsed)
-        u = self.env.unwrapped
-        w = self.env
+        set_minigrid_state(env, sim_state, elapsed_steps=elapsed)
+        u = env.unwrapped
+        w = env
         while w is not u:                       # keep any TimeLimit counter in sync
             if hasattr(w, "_elapsed_steps"):
                 w._elapsed_steps = elapsed
@@ -149,8 +154,137 @@ class OnlineOracle:
         v_pi = (np.asarray(pi, dtype=np.float32) * q).sum(axis=1)
         return q - v_pi[:, None], q
 
+    # ------------------------------------------- Eq (3): the specified Q_g #
+
+    def _branch_pool(self, n: int):
+        """Persistent pool of envs, so branches step in lockstep and the policy
+        is evaluated in ONE batched forward per timestep instead of one per
+        branch. Creating envs is not free, so the pool is reused."""
+        have = len(getattr(self, "_pool", []))
+        if have < n:
+            if not hasattr(self, "_pool"):
+                self._pool = []
+            for _ in range(n - have):
+                e = make_env(self.env_id, self._max_steps, **self._env_kwargs)
+                e.reset(seed=0)
+                self._pool.append(e)
+        return self._pool[:n]
+
+    def q_g(
+        self,
+        sim_states: np.ndarray,
+        probs_fn: Callable[[np.ndarray], np.ndarray],
+        value_fn: Callable[[np.ndarray], np.ndarray],
+        horizon: int = 16,
+        n_rollouts: int = 2,
+        seed: int = 0,
+        bootstrap_tail: bool = True,
+        chunk: int = 256,
+    ) -> tuple[np.ndarray, dict]:
+        """Q_g(s,a) = E[ sum_l gamma^l r_{t+l} | do(a_t = a), pi thereafter ].
+
+        This is Equation (3) of the plan: branch from the saved state, FORCE
+        action a, then follow the current policy for `horizon` steps, averaging
+        over `n_rollouts` continuations. The one-step form r + gamma*V(s') is
+        NOT this quantity -- on a task whose reward is purely terminal it
+        contains no reward at all outside the states adjacent to the goal
+        (measured on DoorKey-5x5: 99.46% of states), which makes A_CF pure
+        critic difference.
+
+        COMMON RANDOM NUMBERS. The quantity that matters is the DIFFERENCE
+        Q_g(s,a) - Q_g(s,a'), and the apples-and-noise variance of the return
+        itself is far larger than that difference. So the uniform used to sample
+        the policy at step t of rollout m from state i is the SAME for every
+        action a: `U[i, m, t]`, drawn once. The branches still diverge, but from
+        a shared source of randomness, which is what makes the paired difference
+        low-variance at small `n_rollouts`.
+
+        The tail is bootstrapped with the critic on branches that neither
+        terminated nor truncated within the horizon, and on truncation (a time
+        limit is not an MDP terminal). Termination gets no bootstrap.
+        """
+        sim_states = np.asarray(sim_states, dtype=np.float64)
+        M, K, R, H = len(sim_states), self.n_actions, int(n_rollouts), int(horizon)
+        g = self.gamma
+
+        U = np.random.default_rng(seed).random((M, R, H))
+        items = [(i, a, m) for i in range(M) for a in range(K) for m in range(R)]
+        total = np.zeros(len(items))
+        terminated_in_h = np.zeros(len(items), dtype=bool)
+        got_reward = np.zeros(len(items), dtype=bool)
+
+        for start in range(0, len(items), chunk):
+            block = items[start : start + chunk]
+            B = len(block)
+            envs = self._branch_pool(B)
+            obs = np.zeros((B, self.obs_dim), dtype=np.float32)
+            disc = np.full(B, g)
+            run = np.ones(B, dtype=bool)      # still stepping
+            boot = np.ones(B, dtype=bool)     # eligible for a critic tail
+            acc = np.zeros(B)
+
+            # forced first action
+            for j, (i, a, _m) in enumerate(block):
+                self._restore_into(envs[j], sim_states[i])
+                o, r, term, trunc, _ = envs[j].step(a)
+                obs[j] = np.asarray(o, dtype=np.float32).ravel()
+                acc[j] = r
+                got_reward[start + j] = r != 0.0
+                if term:
+                    run[j] = boot[j] = False
+                    terminated_in_h[start + j] = True
+                elif trunc:
+                    run[j] = False
+
+            for t in range(H - 1):
+                idx = np.flatnonzero(run)
+                if idx.size == 0:
+                    break
+                p = np.asarray(probs_fn(obs[idx]), dtype=np.float64)
+                u = np.array([U[block[j][0], block[j][2], t] for j in idx])
+                a_t = (np.cumsum(p, axis=1) < u[:, None]).sum(axis=1).clip(0, K - 1)
+                for n, j in enumerate(idx):
+                    o, r, term, trunc, _ = envs[j].step(int(a_t[n]))
+                    obs[j] = np.asarray(o, dtype=np.float32).ravel()
+                    acc[j] += disc[j] * r
+                    if r != 0.0:
+                        got_reward[start + j] = True
+                    disc[j] *= g
+                    if term:
+                        run[j] = boot[j] = False
+                        terminated_in_h[start + j] = True
+                    elif trunc:
+                        run[j] = False
+
+            if bootstrap_tail and boot.any():
+                sel = np.flatnonzero(boot)
+                acc[sel] += disc[sel] * np.asarray(value_fn(obs[sel]), dtype=np.float64)
+            total[start : start + B] = acc
+
+        q = total.reshape(M, K, R).mean(axis=2).astype(np.float32)
+        diag = {
+            # The informativeness gate: what fraction of branches actually saw
+            # reward? If this is ~0 the estimator has degenerated back to a
+            # critic difference and no amount of tuning will help.
+            "reward_coverage": float(got_reward.mean()),
+            "terminated_within_horizon": float(terminated_in_h.mean()),
+            "frac_states_any_reward": float(
+                got_reward.reshape(M, K, R).any(axis=(1, 2)).mean()),
+        }
+        return q, diag
+
+    def a_g(self, sim_states: np.ndarray, pi: np.ndarray, probs_fn, value_fn,
+            **kw) -> tuple[np.ndarray, np.ndarray, dict]:
+        """(A_CF, Q_g, diagnostics), centred on the behaviour policy per Eq (4)."""
+        q, diag = self.q_g(sim_states, probs_fn, value_fn, **kw)
+        v_pi = (np.asarray(pi, dtype=np.float32) * q).sum(axis=1)
+        return q - v_pi[:, None], q, diag
+
     def close(self) -> None:
         self.env.close()
+        for e in getattr(self, "_pool", []):
+            e.close()
+        self._pool = []
 
 
 # --------------------------------------------------------------------------- #

@@ -128,7 +128,10 @@ class RolloutBuffer:
         if q_cf is not None:
             # PPO-CF needs the all-action counterfactual values AND the
             # behaviour policy that centred them. Both are per-(state, action).
-            out["q_cf"] = f(q_cf, torch.float32)
+            # q_cf arrives ALREADY FLAT as (n_steps*n_envs, K) -- it is computed
+            # on a subsample of the flattened rollout -- so it must not go
+            # through `f`, which would collapse its action axis.
+            out["q_cf"] = torch.as_tensor(q_cf, dtype=torch.float32, device=d)
             out["probs"] = f(self.probs, torch.float32)
         return out
 

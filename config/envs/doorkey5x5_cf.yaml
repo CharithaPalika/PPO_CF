@@ -50,8 +50,27 @@ ppo:
   norm_adv_min_std: 1.0e-06
 
   pg_mode: cf_all_action       # the notebook overrides this per arm
-  cf_restore: exact
+  cf_restore: fast             # verified bit-identical to 'exact' by notebook 02
   cf_validate: true
+
+  # --- Eq (3) rollout estimator + Eq (6) blend -------------------------- #
+  # Q_g(s,a) is the discounted RETURN after forcing a then following pi --
+  # NOT the one-step r + gamma*V(s'). That substitution was the original bug:
+  # DoorKey's reward is purely terminal, so the one-step form contained reward
+  # in only 0.54% of states and correlated +0.098 with the GAE advantage. The
+  # rollout form raises reward coverage ~8-20x. Measured on a partly-trained
+  # 5x5 policy (K=7, R=2):
+  #     H= 8   coverage 0.041   16 ms/state
+  #     H=16   coverage 0.098   28 ms/state
+  #     H=32   coverage 0.206   53 ms/state
+  # `cf_reward_coverage` is logged every update -- if it sits near zero the
+  # estimator has degenerated back to a critic difference and no tuning helps.
+  cf_alpha: 0.5                # Eq (6). 1.0 (pure replacement) is NOT the spec
+  cf_horizon: 16
+  cf_rollouts: 2               # common random numbers across actions
+  cf_subsample: 0.10           # ~205 of 2048 states per rollout; cost-forced
+  cf_bootstrap_tail: true
+  cf_branch_envs: 256
 
   ent_mode: fixed
   prob_floor_start: 0.0
@@ -73,6 +92,7 @@ run:
   record_trajectories: true
   eval_every_updates: 0
   eval_episodes: 20
+  # Rung 1: both arms start cold. There is nothing below 5x5 to warm from.
   init_from: null
 
 reward:

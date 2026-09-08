@@ -5,7 +5,7 @@
 #SBATCH --time=01:00:00
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=4G
-# #SBATCH --partition=<your_partition>
+#SBATCH --partition=normal
 
 # Uploads the offline wandb runs written by the array tasks. Separate from
 # training on purpose: an upload that hangs or fails must not be able to cost a
@@ -14,15 +14,25 @@
 #
 #   sbatch slurm/04_sync_wandb.sbatch
 #
-# IF YOUR COMPUTE NODES HAVE NO OUTBOUND NETWORK this job will fail with a
-# connection error and nothing is lost -- the offline directories stay on disk.
-# Run the same command from wherever you do have network:
-#     source ~/.venvs/ppo_cf/bin/activate
-#     wandb sync artifacts/wandb/offline-run-*
-# That is a file transfer, not compute, which is why it is the one thing in
-# this project allowed off a compute node.
+# Compute nodes on this cluster DO have outbound network -- 00_create_venv pulls
+# torch and wandb from PyPI on one -- so this runs as an ordinary batch job like
+# everything else. If an upload fails, nothing is lost: the offline directories
+# stay on disk and the job is safe to resubmit (synced runs are skipped).
+#
+# Do NOT run `wandb sync` on xlogin as a workaround. It is not needed here, and
+# a long upload started in an SSH session dies with the session.
 
-source "$(dirname "$0")/_prelude.sh"
+# $0 IS NOT THIS FILE. sbatch copies the script into the node's spool directory
+# and runs the copy, so under Slurm $0 is /var/spool/slurmd/job<N>/slurm_script
+# and `dirname "$0"` points at the spool, not the repository. SLURM_SUBMIT_DIR is
+# the directory sbatch was called from, which is the project root by contract.
+cd "${SLURM_SUBMIT_DIR:-$PWD}" || exit 1
+if [ ! -f slurm/_prelude.sh ]; then
+    echo "no slurm/_prelude.sh under $PWD -- submit from the project root:" >&2
+    echo "    cd ~/ppo_cf && sbatch slurm/<script>.sbatch" >&2
+    exit 1
+fi
+source slurm/_prelude.sh
 
 shopt -s nullglob
 runs=(artifacts/wandb/offline-run-*)

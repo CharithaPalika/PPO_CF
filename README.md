@@ -59,3 +59,11 @@ new simulator-state accessor.
 
 `TUNING.md` lists the knobs in the order worth trying, each tied to the
 diagnostic that justifies pulling it.
+
+---
+
+## Running E1 on the cluster
+
+- **`HOW_TO_RUN.md`** — the short path: copy up, build, verify, smoke, submit.
+- **`RUNBOOK.md`** — the reference: every command, cost table, recovery.
+- **`slurm/README.md`** — why the pipeline is shaped the way it is.

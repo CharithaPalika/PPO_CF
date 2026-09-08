@@ -16,6 +16,14 @@
 # Submits and exits. Nothing computes here: this runs on the login node.
 set -euo pipefail
 cd "$(dirname "$0")"
+
+# --output=logs/... is resolved by Slurm relative to the submission directory and
+# Slurm does NOT create it: a missing logs/ makes every job fail with no output
+# to explain why.
+mkdir -p logs artifacts/{manifests,chunks,tables,figures,status} runs
+
+command -v sbatch >/dev/null || { echo "sbatch not found -- run this on the login node" >&2; exit 1; }
+
 source slurm/_submit_lib.sh
 
 parse_chunks "$@" || exit 1

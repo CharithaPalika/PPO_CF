@@ -5,7 +5,7 @@
 #SBATCH --time=00:10:00
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=4G
-# #SBATCH --partition=<your_partition>
+#SBATCH --partition=normal
 
 # Writes artifacts/manifests/<STAGE>.json: the flat, ordered list of every unit
 # this stage still needs, minus anything already in its ledger. Pure
@@ -19,7 +19,17 @@
 # --export=ALL alone. Never hand-write `sbatch --export=ALL,PROJ_GROUPS=gae,cf,shuf`
 # -- sbatch splits that on its own commas and delivers PROJ_GROUPS=gae.
 
-source "$(dirname "$0")/_prelude.sh"
+# $0 IS NOT THIS FILE. sbatch copies the script into the node's spool directory
+# and runs the copy, so under Slurm $0 is /var/spool/slurmd/job<N>/slurm_script
+# and `dirname "$0"` points at the spool, not the repository. SLURM_SUBMIT_DIR is
+# the directory sbatch was called from, which is the project root by contract.
+cd "${SLURM_SUBMIT_DIR:-$PWD}" || exit 1
+if [ ! -f slurm/_prelude.sh ]; then
+    echo "no slurm/_prelude.sh under $PWD -- submit from the project root:" >&2
+    echo "    cd ~/ppo_cf && sbatch slurm/<script>.sbatch" >&2
+    exit 1
+fi
+source slurm/_prelude.sh
 
 python pipeline/manifest.py \
     --stage    "${STAGE}" \

@@ -1,0 +1,20 @@
+# Line endings. Copying this repo from Windows to the cluster is the normal
+# workflow, and sbatch refuses a script with CRLF ("Batch script contains DOS
+# line breaks"), while a sourced .sh with CRLF fails in confusing ways instead.
+# Pinning LF here means a clone or checkout is correct on both sides without
+# anyone remembering to run dos2unix.
+* text=auto eol=lf
+
+*.sh      text eol=lf
+*.sbatch  text eol=lf
+*.py      text eol=lf
+*.yaml    text eol=lf
+*.yml     text eol=lf
+*.md      text eol=lf
+*.ipynb   text eol=lf
+
+*.pdf  binary
+*.png  binary
+*.jpg  binary
+*.npz  binary
+*.pt   binary

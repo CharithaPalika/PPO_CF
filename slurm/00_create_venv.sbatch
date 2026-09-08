@@ -5,7 +5,7 @@
 #SBATCH --time=00:50:00
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=8G
-# #SBATCH --partition=<your_partition>
+#SBATCH --partition=normal
 
 #   sbatch slurm/00_create_venv.sbatch
 #   tail -f logs/venv_<jobid>.out
@@ -18,10 +18,33 @@
 # NOT `set -e`: a failed check here is data to report, not a reason to abort
 # the report.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+
+# NOTHING RUNS ON THE LOGIN NODE. If this script is executed directly on xlogin
+# instead of submitted, it exits here rather than loading the machine everyone
+# shares -- and rather than dying the moment the SSH session drops.
+if [ -z "${SLURM_JOB_ID:-}" ] && [ "${PPO_CF_ALLOW_LOGIN:-0}" != "1" ]; then
+    echo "REFUSING: this is a batch script, not a command." >&2
+    echo "  sbatch slurm/$(basename "$0")" >&2
+    exit 1
+fi
+
+# $0 IS NOT THIS FILE under sbatch: the script is copied into the node's spool
+# directory and the copy is executed, so `dirname "$0"` is /var/spool/slurmd/...
+# and every relative path resolved from it lands outside the repository. That is
+# what made `pip install -r requirements.txt` fail with "No such file".
+PROJECT_ROOT="${SLURM_SUBMIT_DIR:-$PWD}"
+cd "$PROJECT_ROOT" || exit 1
+if [ ! -f requirements.txt ]; then
+    echo "no requirements.txt under $PWD -- submit from the project root:" >&2
+    echo "    cd ~/ppo_cf && sbatch slurm/00_create_venv.sbatch" >&2
+    exit 1
+fi
 mkdir -p logs
 
-VENV="${PROJ_VENV:-$HOME/.venvs/ppo_cf}"
+# INSIDE the project, not $HOME/.venvs. One checkout carries its own interpreter,
+# so moving or copying the project moves the environment with it, `rm -rf` of the
+# project leaves nothing behind, and two checkouts cannot share a venv by accident.
+VENV="${PROJ_VENV:-$PROJECT_ROOT/.venv}"
 PYBIN="${PROJ_PYTHON:-python3}"
 
 echo "=================== node ==================="
@@ -47,7 +70,7 @@ echo; echo "============ 2. torch, FIRST and ALONE, CPU index ============"
 pip install --index-url https://download.pytorch.org/whl/cpu torch 2>&1 | tail -3
 
 echo; echo "=================== 3. everything else ==================="
-pip install -r requirements.txt 2>&1 | tail -4
+pip install -r "$PROJECT_ROOT/requirements.txt" 2>&1 | tail -4
 # wandb is a pipeline dependency, not a project one: nothing in agents/ or
 # oracle/ imports it, and utils/wandb_sink.py degrades to CSV-only without it.
 pip install wandb 2>&1 | tail -2

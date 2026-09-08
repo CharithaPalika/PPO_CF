@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=8G
 #SBATCH --array=0-15%16
-# #SBATCH --partition=<your_partition>
+#SBATCH --partition=long
 
 # Runs one contiguous slice of artifacts/manifests/<STAGE>.json. One unit of
 # work = one (stage, arm, seed) training run.
@@ -30,7 +30,17 @@
 # job; the cpus are for torch's numeric libraries (batch 8192, shared CNN).
 # 4 is measured-adequate. Check MaxRSS with sacct before changing --mem.
 
-source "$(dirname "$0")/_prelude.sh"
+# $0 IS NOT THIS FILE. sbatch copies the script into the node's spool directory
+# and runs the copy, so under Slurm $0 is /var/spool/slurmd/job<N>/slurm_script
+# and `dirname "$0"` points at the spool, not the repository. SLURM_SUBMIT_DIR is
+# the directory sbatch was called from, which is the project root by contract.
+cd "${SLURM_SUBMIT_DIR:-$PWD}" || exit 1
+if [ ! -f slurm/_prelude.sh ]; then
+    echo "no slurm/_prelude.sh under $PWD -- submit from the project root:" >&2
+    echo "    cd ~/ppo_cf && sbatch slurm/<script>.sbatch" >&2
+    exit 1
+fi
+source slurm/_prelude.sh
 
 echo "stage=${STAGE} chunk=${SLURM_ARRAY_TASK_ID}/${N_CHUNKS:-16}"
 

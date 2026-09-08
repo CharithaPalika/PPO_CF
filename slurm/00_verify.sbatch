@@ -5,13 +5,37 @@
 #SBATCH --time=00:30:00
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=8G
-# #SBATCH --partition=<your_partition>
+#SBATCH --partition=normal
 
 # Installs nothing. Proves this cluster can run this project, without spending
 # a queue slot on real work. Run it after the venv build, after any dependency
 # change, and any time a stage fails in a way you cannot explain.
 
-source "$(dirname "$0")/_prelude.sh"
+# $0 IS NOT THIS FILE. sbatch copies the script into the node's spool directory
+# and runs the copy, so under Slurm $0 is /var/spool/slurmd/job<N>/slurm_script
+# and `dirname "$0"` points at the spool, not the repository. SLURM_SUBMIT_DIR is
+# the directory sbatch was called from, which is the project root by contract.
+cd "${SLURM_SUBMIT_DIR:-$PWD}" || exit 1
+if [ ! -f slurm/_prelude.sh ]; then
+    echo "no slurm/_prelude.sh under $PWD -- submit from the project root:" >&2
+    echo "    cd ~/ppo_cf && sbatch slurm/<script>.sbatch" >&2
+    exit 1
+fi
+source slurm/_prelude.sh
+
+echo "--- 0. no CRLF line endings ---"
+# sbatch refuses a CRLF *script*, so if you are reading this the .sbatch files are
+# fine. Sourced .sh files and .py files are not checked by anything else, and a
+# stray \r there fails in a way that looks unrelated to line endings.
+bad=$(grep -rlU $'\r' --include='*.sh' --include='*.py' --include='*.yaml' \
+        --include='*.sbatch' slurm pipeline config agents envs oracle utils dataio scripts \
+        2>/dev/null || true)
+if [ -n "$bad" ]; then
+    echo "CRLF found in:" >&2; echo "$bad" >&2
+    echo "fix with: bash slurm/fix_line_endings.sh" >&2
+    exit 1
+fi
+echo "  all shell/python/yaml files are LF"
 
 echo "--- 1. every repository module imports ---"
 # A typo in an import statement discovered by the array at 3 a.m. is an

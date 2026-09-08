@@ -5,7 +5,7 @@
 #SBATCH --time=01:00:00
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
-# #SBATCH --partition=<your_partition>
+#SBATCH --partition=normal
 
 # Merges the chunk files into the stage ledger, then does one of two things:
 #
@@ -25,7 +25,17 @@
 #   sbatch --export=ALL slurm/03_analyse.sbatch
 # NOT `sbatch --export=ALL,PROJ_GROUPS=gae,cf,shuf ...` -- sbatch splits on its own commas.
 
-source "$(dirname "$0")/_prelude.sh"
+# $0 IS NOT THIS FILE. sbatch copies the script into the node's spool directory
+# and runs the copy, so under Slurm $0 is /var/spool/slurmd/job<N>/slurm_script
+# and `dirname "$0"` points at the spool, not the repository. SLURM_SUBMIT_DIR is
+# the directory sbatch was called from, which is the project root by contract.
+cd "${SLURM_SUBMIT_DIR:-$PWD}" || exit 1
+if [ ! -f slurm/_prelude.sh ]; then
+    echo "no slurm/_prelude.sh under $PWD -- submit from the project root:" >&2
+    echo "    cd ~/ppo_cf && sbatch slurm/<script>.sbatch" >&2
+    exit 1
+fi
+source slurm/_prelude.sh
 
 python pipeline/analyse.py \
     --stage    "${STAGE}" \

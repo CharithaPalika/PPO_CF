@@ -6,11 +6,30 @@
 
 set -euo pipefail
 
+# ---- 0. NOTHING RUNS ON THE LOGIN NODE -------------------------------------
+# Every job script sources this file, so this one check covers all of them: if a
+# job script is executed directly on xlogin instead of being submitted, it stops
+# here. Training on a login node loads the machine everyone shares, and it dies
+# the moment the SSH session drops -- which is exactly the failure this guard
+# exists to make impossible.
+#
+# The one legitimate off-cluster use is running pipeline/analyse.py by hand on a
+# copy of the results; that path never sources this file, but
+# PPO_CF_ALLOW_LOGIN=1 is the escape hatch if you need one.
+if [ -z "${SLURM_JOB_ID:-}" ] && [ "${PPO_CF_ALLOW_LOGIN:-0}" != "1" ]; then
+    echo "REFUSING: not inside a Slurm job. Batch scripts are submitted, not run." >&2
+    echo "  sbatch slurm/<script>.sbatch      (or ./submit_e1.sh for the pipeline)" >&2
+    exit 1
+fi
+
 # ---- 1. project root -------------------------------------------------------
 # Resolved from this file's own location, so the scripts work from any cwd and
 # the path appears exactly once in the repository. NOTHING here is hard-coded
 # to a machine: config/config.py derives PROJECT_ROOT the same way, so runs/,
 # artifacts/ and logs/ follow the checkout wherever it lives.
+# BASH_SOURCE[0] is THIS file's real path even under sbatch, because the .sbatch
+# `source`s it from slurm/ after cd-ing to SLURM_SUBMIT_DIR. ($0 would be the
+# spool copy -- see the comment at the top of any .sbatch.)
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 export PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
@@ -18,10 +37,13 @@ export PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 mkdir -p logs artifacts/{manifests,chunks,tables,figures,status} runs
 
 # ---- 2. the project's OWN virtualenv ---------------------------------------
-# Not a shared or lab-wide venv: installing these pins into a shared one moves
-# a transitive dependency underneath somebody else's project and theirs moves
-# one underneath yours. Override with PROJ_VENV=/some/path.
-VENV="${PROJ_VENV:-$HOME/.venvs/ppo_cf}"
+# Not a shared or lab-wide venv: installing these pins into a shared one moves a
+# transitive dependency underneath somebody else's project and theirs moves one
+# underneath yours. And INSIDE the project rather than $HOME/.venvs, so one
+# checkout carries its own interpreter -- moving the project moves the
+# environment with it, deleting it leaves nothing behind, and two checkouts can
+# never share a venv by accident. Override with PROJ_VENV=/some/path.
+VENV="${PROJ_VENV:-$PROJECT_ROOT/.venv}"
 if [ ! -f "$VENV/bin/activate" ]; then
     echo "no venv at $VENV -- run: sbatch slurm/00_create_venv.sbatch" >&2
     exit 1

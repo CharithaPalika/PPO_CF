@@ -6,15 +6,22 @@
 # different ways.
 
 # ===========================================================================
-# FILL THESE IN BEFORE YOUR FIRST SUBMIT -- see RUNBOOK.md step 1.
-#     sinfo -s                                              -> partition, limits
-#     scontrol show partition <name>                        -> walltime cap
+# CLUSTER SETTINGS. Measured on NUS SoC (xlogin) 2026-09-08:
+#
+#   sinfo -s                -> normal: MaxTime 3:00:00  (PriorityJobFactor 4)
+#                              long:   MaxTime 3-00:00:00 (PriorityJobFactor 1)
+#   scontrol show partition -> normal caps at 3 h, which is why the 12 h array
+#                              job runs on `long` and every short job on `normal`
+#
+# The partitions live in the #SBATCH headers (02_run_chunks -> long, everything
+# else -> normal). Only the job caps are here.
+#
+# STILL TO CONFIRM on your account -- run this and correct the two numbers:
 #     sacctmgr show assoc user=$USER format=account,maxjobs,maxsubmit
 # ===========================================================================
 MAX_SUBMIT=32          # your account's submitted-job cap
 CONCURRENCY=16         # your account's RUNNING-job cap -> the "%K" array throttle
 export CONCURRENCY     # pipeline/analyse.py reads this when it requeues
-# PARTITION=""         # uncomment and set, then uncomment #SBATCH --partition lines
 # ===========================================================================
 
 default_groups() { echo "gae,cf,shuf"; }

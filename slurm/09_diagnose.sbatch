@@ -14,8 +14,19 @@
 # crash reproduces on a different node family.
 
 set -uo pipefail                    # not -e: collect every result, then report
-cd "$(dirname "$0")/.."
-source "${PROJ_VENV:-$HOME/.venvs/ppo_cf}/bin/activate"
+
+# NOTHING RUNS ON THE LOGIN NODE. If this script is executed directly on xlogin
+# instead of submitted, it exits here rather than loading the machine everyone
+# shares -- and rather than dying the moment the SSH session drops.
+if [ -z "${SLURM_JOB_ID:-}" ] && [ "${PPO_CF_ALLOW_LOGIN:-0}" != "1" ]; then
+    echo "REFUSING: this is a batch script, not a command." >&2
+    echo "  sbatch slurm/$(basename "$0")" >&2
+    exit 1
+fi
+
+PROJECT_ROOT="${SLURM_SUBMIT_DIR:-$PWD}"      # $0 is the spool copy under sbatch
+cd "$PROJECT_ROOT" || exit 1
+source "${PROJ_VENV:-$PROJECT_ROOT/.venv}/bin/activate"
 
 echo "host=$(hostname) arch=$(uname -m) kernel=$(uname -r)"
 echo "cpu flags: $(grep -m1 ^flags /proc/cpuinfo | tr ' ' '\n' | \

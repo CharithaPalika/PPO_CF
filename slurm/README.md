@@ -7,9 +7,22 @@ a command that appears in two documents will be wrong in one of them within a mo
 
 **Nothing runs on the login node.** Not training, not analysis, not `pip install`.
 Submitting a job is a control-plane action; everything else is compute and belongs
-inside an `.sbatch`. The single exception is `wandb sync` if your compute nodes have
-no outbound network — that is a file transfer, not compute, and `04_sync_wandb.sbatch`
-says so.
+inside an `.sbatch`.
+
+This is **enforced, not just documented**. `_prelude.sh` exits immediately when
+`SLURM_JOB_ID` is unset, and the two scripts that do not source it carry the same
+check, so `bash slurm/02_run_chunks.sbatch` on xlogin prints `REFUSING: not inside a
+Slurm job` and stops. `PPO_CF_ALLOW_LOGIN=1` is the escape hatch. The only things
+that belong on the login node are `sbatch`, `squeue`/`sacct`/`scancel`, `tail` on a
+log, and `fix_line_endings.sh` (a `sed` over ~60 small files — the same order of work
+as `ls`, and a prerequisite for submitting anything at all).
+
+A consequence worth stating: **the SSH session can be closed.** `sbatch` hands the
+job to Slurm and returns, and the chain continues because `03_analyse` calls `sbatch`
+from inside its own compute-node job. No `tmux`, no `nohup`.
+
+`wandb sync` also runs as a batch job here: compute nodes on this cluster have
+outbound network — `00_create_venv` pulls torch and wandb from PyPI on one.
 
 ## The shape that rule forces
 
@@ -78,7 +91,7 @@ whose gaps of interest are ~40k). Everything else comes from the YAML as committ
 - **No absolute paths.** `_prelude.sh` resolves `PROJECT_ROOT` from its own location
   and `config/config.py` does the same, so the checkout runs wherever it lands.
 
-## The five guards, and what each one guards against
+## The guards, and what each one guards against
 
 **1. `sbatch --export` splits on commas, and there is no escaping.**
 `--export=ALL,STAGE=E1_RBD6,PROJ_GROUPS=gae,cf,shuf` is read as six items; `PROJ_GROUPS`
@@ -95,6 +108,16 @@ the human-readable receipt.
 arrays at all, and the receiving job reads the builtin instead — observed delivering the
 literal string `1046`. Same silent corruption as guard 1, from the other direction, and
 the reason the variable is `PROJ_GROUPS` everywhere.
+
+**1c. `$0` is not the script under `sbatch`.** Slurm copies the batch script into
+the node's spool directory and executes the copy, so inside a job `$0` is
+`/var/spool/slurmd/job<N>/slurm_script`. Every path resolved from `dirname "$0"`
+then lands outside the repository — which is how `pip install -r requirements.txt`
+came back with "No such file or directory" while the job's own `--output=logs/...`
+worked fine (Slurm resolves that one against the submission directory). Every
+`.sbatch` now starts from `${SLURM_SUBMIT_DIR:-$PWD}` and sources `slurm/_prelude.sh`
+by relative path; `_prelude.sh` then resolves `PROJECT_ROOT` from `BASH_SOURCE[0]`,
+which *is* its real path because it was sourced from the real file.
 
 **2. Telemetry must never be able to fail an experiment.** wandb starts a sidecar per
 run over a socket under an NFS home. Sixteen array tasks starting in the same second
@@ -125,13 +148,41 @@ redirects **all** output into `runs/_smoke/` and `artifacts/_smoke/`. One enviro
 variable moves one path (`ART` in `pipeline/stages.py`) and one run-name prefix, so
 there is no code path where a smoke pass can write a row into a real ledger.
 
+## Environment and partitions
+
+The virtualenv lives at **`<project>/.venv`**, not `$HOME/.venvs`. A checkout then
+carries its own interpreter: moving the project moves the environment with it,
+deleting the project leaves nothing behind, and two checkouts cannot share a venv by
+accident. `PROJ_VENV=/some/path` overrides it.
+
+Partitions are set in the `#SBATCH` headers from the measured limits on NUS SoC:
+
+| Partition | MaxTime | Priority factor | Jobs |
+|---|---|---|---|
+| `normal` | 3:00:00 | 4 | venv, verify, manifest, analyse, wandb sync |
+| `long` | 3-00:00:00 | 1 | `02_run_chunks` — 12 h array, units up to ~5.5 h |
+
+The array cannot run on `normal`: a single RedBlueDoors-8x8 CF unit is longer than
+that partition's entire cap. Everything else is well inside 3 h and takes `normal`'s
+higher priority factor.
+
+## Line endings
+
+The repo is copied from Windows, so CRLF is a recurring hazard. `sbatch` refuses a
+CRLF *script* outright, which is the friendly case; a **sourced** file
+(`_prelude.sh`, `_submit_lib.sh`, `env.sh`) is not refused by anything — the `\r`
+just becomes part of the last word on every line and fails somewhere that looks
+unrelated. Three layers: `.gitattributes` pins `eol=lf`, `fix_line_endings.sh`
+repairs a copy, and `00_verify.sbatch` section 0 refuses to pass with any CRLF left.
+
 ## Files
 
 | file | what it is |
 |---|---|
 | `env.sh` | credentials. **gitignored**, never `cat`'d |
-| `_prelude.sh` | sourced by every `.sbatch`: root, venv, threads, headless backend, wandb mode, the `--export` guard |
-| `_submit_lib.sh` | sourced by `submit_e1.sh`: how a stage is submitted. **Your cluster's caps go at the top of this file.** |
+| `fix_line_endings.sh` | CRLF → LF over the project's own text files, after a copy from Windows |
+| `_prelude.sh` | sourced by every `.sbatch`: the login-node guard, root, venv, threads, headless backend, wandb mode, the `PROJ_GROUPS` guard |
+| `_submit_lib.sh` | sourced by `submit_e1.sh`: how a stage is submitted. **Your account's job caps go at the top of this file.** |
 | `00_create_venv.sbatch` | builds the project-owned venv on a compute node |
 | `00_verify.sbatch` | installs nothing; proves the venv, the configs, the simulator restore, and one real PPO-CF update |
 | `01_manifest.sbatch` | builds the run list for one stage |

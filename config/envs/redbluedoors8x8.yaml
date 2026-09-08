@@ -1,0 +1,114 @@
+# MiniGrid-RedBlueDoors-8x8-v0
+#
+# A different failure mode from DoorKey, which is why it is worth having. The
+# agent starts in a room with a red door and a blue door and must open the RED
+# one first, then the blue one. There is no key. Opening blue first also ENDS
+# the episode, with reward 0.
+#
+# THREE THINGS THAT DIFFER FROM THE DOORKEY CONFIGS:
+#
+# 1. `success_on: positive_reward`. The wrong door order terminates too, so the
+#    default `terminated` rule would log a failure as a success. Measured:
+#    opening blue before red gives terminated=True, reward=0.
+#
+# 2. The grid is 16x8, NOT square (obs 16x8x3 = 384, sim_state 390). The CNN
+#    handles it and produces a 320-wide embedding, against 64 for DoorKey-8x8 --
+#    the pooling stage does not collapse a 16-wide grid to a single cell. The
+#    notebook reads the shape off the environment rather than hard-coding it.
+#
+# 3. The sub-goals are "red door open" then "blue door open" rather than
+#    "carrying the key" then "door open". The probe detects which environment it
+#    is in by whether the grid contains a key; the logged columns are
+#    `subgoal1_rate_100` / `subgoal2_rate_100` either way, and the notebook
+#    supplies the labels.
+#
+# HYPERPARAMETERS. rl-baselines3-zoo has NO entry for the 8x8 variant -- it
+# tunes RedBlueDoors-6x6 only (n_steps 512, n_timesteps 1e6). This config keeps
+# that n_steps and doubles the budget, because 8x8 is meaningfully bigger:
+#
+#            grid    max_steps   random success   wrong-order   mean ep. length
+#   6x6     12x6        720         12.00%          52.5%            --
+#   8x8     16x8       1280          8.50%          43.8%           887
+#
+# WATCH THE HORIZON. max_steps nearly doubled while n_steps did not, so GAE now
+# spans 512 of up to 1280 steps. That ratio -- credit chain far longer than the
+# rollout -- is exactly what broke DoorKey-8x8, where it was 128 of 640 and the
+# critic (EV ~ 0) had to carry the rest. If this stalls with the sub-goal rates
+# flat, raise n_steps to 1024 (batch 16384) BEFORE touching anything else.
+
+env:
+  env_id: MiniGrid-RedBlueDoors-8x8-v0
+  n_envs: 16
+  max_episode_steps: null      # MiniGrid's own limit: 1280
+  obs_norm: image
+  fully_observable: true       # the oracle needs an MDP; do not change
+  success_on: positive_reward  # <- see note 1 above
+  layout_seeds: null
+  layout_seed_mode: cycle
+
+ppo:
+  total_timesteps: 2000000     # 2x the zoo's 6x6 budget; see the note below
+  n_steps: 512                 # zoo's value for this env; 16 x 512 = 8192
+  n_epochs: 4
+  n_minibatches: 8             # -> minibatch 1024
+  learning_rate: 0.001
+  anneal_lr: false
+  optim_eps: 1.0e-8
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_coef: 0.2
+  clip_vloss: true
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: null
+
+  norm_adv: batch
+  norm_adv_min_std: 1.0e-06
+
+  pg_mode: gae
+  ent_mode: fixed
+  prob_floor_start: 0.0
+  prob_floor_end: 0.0
+
+  encoder: cnn
+  share_encoder: true
+  hidden_sizes: [64]
+  activation: tanh
+  separate_grad_clip: false
+  device: cpu
+
+run:
+  run_name: redbluedoors8x8
+  seeds: [0]
+  trajectory_stride: 4
+  compact_trajectory_dtypes: true
+  log_every_updates: 10
+  record_trajectories: true
+  eval_every_updates: 0
+  eval_episodes: 20
+  init_from: null              # nothing below this env to warm-start from
+
+reward:
+  # If you ever turn potential shaping on here, the weights mean
+  # "red door open" and "blue door open" rather than key/door.
+  potential_shaping: false
+  potential_key: 0.0
+  potential_door: 0.0
+  count_bonus_coef: 0.0
+
+oracle:
+  checkpoint_fraction: 0.75
+
+note: |
+  7 actions (log 7 = 1.946 nats). `pickup` (3) and `drop` (4) are useless here
+  -- there is nothing to carry -- while `toggle` (5) is the only action that can
+  ever open a door, so it is the one to watch in the per-action panel. Reward on
+  success is 1 - 0.9*(steps/max_steps) as in DoorKey.
+
+  The ordering constraint is what makes this interesting: a policy that learns
+  "toggle any door you see" will open blue first roughly half the time and end
+  the episode with nothing. Expect subgoal1 (red) to rise well before success,
+  and watch the gap between subgoal2 (blue open) and success -- unlike DoorKey,
+  where opening the door almost guaranteed finishing, here blue can be opened in
+  the losing order.

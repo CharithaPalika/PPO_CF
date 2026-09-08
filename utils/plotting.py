@@ -354,6 +354,14 @@ def plot_minigrid_visitation(traj, grid_shape=None, figsize=(12, 3.6)):
     if grid_shape is None:
         n_cells = (d["sim_state"].shape[1] - 6) // 3
         side = int(round(n_cells ** 0.5))
+        if side * side != n_cells:
+            raise ValueError(
+                f"cannot infer the grid shape: {n_cells} cells is not square. "
+                "The packed sim_state does not record width and height, so pass "
+                "grid_shape=(W, H) explicitly -- e.g. (12, 6) for "
+                "MiniGrid-RedBlueDoors-6x6-v0. Guessing would silently mis-bin "
+                "every visit and index out of range on the wider axis."
+            )
         grid_shape = (side, side)
     w, h = grid_shape
 
@@ -377,30 +385,41 @@ def plot_minigrid_visitation(traj, grid_shape=None, figsize=(12, 3.6)):
     return fig
 
 
-def plot_subgoal_ladder(scalars: dict, figsize=(13, 3.8)):
-    """key_rate -> door_rate -> success_rate, from scalars.csv.
+def plot_subgoal_ladder(scalars: dict, labels=None, figsize=(13, 3.8)):
+    """subgoal1 -> subgoal2 -> success, from scalars.csv.
 
     On a sparse task success rate is a terrible progress signal: it can sit at
     exactly zero for millions of frames while the policy is either improving or
-    dying, and the two look identical. DoorKey has hard prerequisites -- no goal
-    without an open door, no open door without the key -- so the ladder says
-    WHICH rung the policy is stuck on, and the rungs need opposite responses:
+    dying, and the two look identical. Both environments here have hard
+    prerequisites, so the ladder says WHICH rung the policy is stuck on, and the
+    rungs need opposite responses:
 
         all three flat            -> no signal at all; check adv_std_raw
-        key rising, door flat     -> stuck at the door (toggle suppressed, or
-                                     the door is never approached with the key)
-        door rising, success flat -> stuck between the door and the goal;
-                                     usually just undertrained
+        sg1 rising, sg2 flat      -> stuck at the second prerequisite
+        sg2 rising, success flat  -> stuck between it and the goal
+
+    What the sub-goals MEAN is environment-specific, so pass `labels`:
+        DoorKey       ("Picked up the key",  "Opened the door")
+        RedBlueDoors  ("Opened the red door", "Opened the blue door")
+
+    Reads `subgoal{1,2}_rate_100` and falls back to the older
+    `key_rate_100` / `door_rate_100` so runs recorded before the rename still
+    plot without being re-run.
     """
+    labels = tuple(labels) if labels else ("Sub-goal 1", "Sub-goal 2")
+    cols = [("subgoal1_rate_100", "key_rate_100"),
+            ("subgoal2_rate_100", "door_rate_100"),
+            ("success_rate_100", None)]
+    titles = [labels[0], labels[1], "Solved"]
+    colours = ["#3b6ea5", "#8a6d3b", "#4f8a5b"]
+
     fig, axes = plt.subplots(1, 3, figsize=figsize, sharey=True)
-    panels = [("key_rate_100", "Picked up the key", "#3b6ea5"),
-              ("door_rate_100", "Opened the door", "#8a6d3b"),
-              ("success_rate_100", "Solved", "#4f8a5b")]
-    for ax, (key, title, color) in zip(axes, panels):
-        for s, d in scalars.items():
-            if key not in d.columns:
+    for ax, (new_col, old_col), title, colour in zip(axes, cols, titles, colours):
+        for s_, d in scalars.items():
+            col = new_col if new_col in d.columns else old_col
+            if col is None or col not in d.columns:
                 continue
-            ax.plot(d["global_step"], d[key], lw=1.5, color=color, label=f"seed {s}")
+            ax.plot(d["global_step"], d[col], lw=1.5, color=colour, label=f"seed {s_}")
         ax.set_ylim(-0.03, 1.03)
         ax.set_xlabel("environment steps")
         ax.set_title(title, fontsize=10)

@@ -93,6 +93,15 @@ class EnvConfig:
     layout_seeds: Sequence[int] | None = None
     layout_seed_mode: str = "cycle"
 
+    # What counts as a SUCCESS when an episode ends.
+    #   "terminated"      -> any MDP termination (MountainCar reaches the goal,
+    #                        Taxi drops off correctly, DoorKey reaches the goal).
+    #   "positive_reward" -> termination AND a positive episode return.
+    # RedBlueDoors needs the second: opening the blue door BEFORE the red one
+    # also terminates, with reward 0, so `terminated` alone would log a failure
+    # as a success. MountainCar cannot use it -- its goal reward is -1.
+    success_on: str = "terminated"
+
     # Reward normalisation is deliberately OFF. NB02 computes
     # Q_CF(s,a) = r + gamma * V(s'), which needs r and V in the SAME units.
     normalize_reward: bool = False
@@ -185,10 +194,25 @@ class PPOConfig:
     # assigned to DIFFERENT batch states. If it reproduces the benefit, the
     # benefit was never counterfactual information.
     pg_mode: str = "gae"
-    # Eq (6): L_actor = (1 - alpha) * L_PPO + alpha * L_CF. The plan fixes 0.5.
-    # alpha = 1.0 (pure replacement) is NOT the specification, and it is what
-    # made the first PPO-CF run degrade monotonically.
-    cf_alpha: float = 0.5
+    # The actor loss is a weighted sum of the two policy gradients:
+    #
+    #     L_actor = alpha_gae * L_PPO + alpha_cf * L_CF
+    #
+    # The plan's Eq (6) is the convex case, (1 - alpha) and alpha with
+    # alpha = 0.5, which is the default here. The two weights are independent so
+    # each can be moved on its own -- e.g. alpha_gae 1.0 / alpha_cf 0.25 adds the
+    # counterfactual term as a small correction WITHOUT weakening plain PPO,
+    # which the convex form cannot express. alpha_cf = 1.0 with alpha_gae = 0.0
+    # is pure replacement; that is NOT the specification and it is what made the
+    # first PPO-CF run degrade monotonically.
+    #
+    # ONE CAVEAT. Outside the convex case the TOTAL actor gradient magnitude
+    # changes with these weights, so a CF arm at alpha_gae + alpha_cf = 1.5 takes
+    # larger steps than a control arm at 1.0. That is the step-size confound the
+    # comparison already has to watch; keep an eye on approx_kl across the arms,
+    # or use target_kl to cap it.
+    alpha_gae: float = 0.5
+    alpha_cf: float = 0.5
     # --- Eq (3) rollout estimator ----------------------------------------- #
     # Q_g is the discounted return after FORCING a, then following pi. It is
     # estimated by branching from saved simulator states: K * cf_rollouts
@@ -374,7 +398,8 @@ class ExperimentConfig:
             f"prob floor         {self.ppo.prob_floor_start} -> {self.ppo.prob_floor_end}  (0 = off)",
             f"adv norm           {self.ppo.norm_adv}  (min_std {self.ppo.norm_adv_min_std:g})",
             f"policy gradient    {self.ppo.pg_mode}"
-            + (f"  alpha={self.ppo.cf_alpha}, Q_g horizon={self.ppo.cf_horizon} "
+            + (f"  alpha_gae={self.ppo.alpha_gae} alpha_cf={self.ppo.alpha_cf}, "
+               f"Q_g horizon={self.ppo.cf_horizon} "
                f"x{self.ppo.cf_rollouts} rollouts, subsample={self.ppo.cf_subsample:.0%}, "
                f"restore={self.ppo.cf_restore}"
                if self.ppo.pg_mode.startswith("cf") else ""),
@@ -499,8 +524,12 @@ def _validate(cfg: ExperimentConfig) -> None:
     if cfg.ppo.pg_mode not in ("gae", "cf_all_action", "cf_shuffled"):
         raise ValueError(
             f"pg_mode must be gae|cf_all_action|cf_shuffled, got {cfg.ppo.pg_mode!r}")
-    if not 0.0 <= cfg.ppo.cf_alpha <= 1.0:
-        raise ValueError(f"cf_alpha must be in [0, 1], got {cfg.ppo.cf_alpha}")
+    if cfg.ppo.alpha_gae < 0.0 or cfg.ppo.alpha_cf < 0.0:
+        raise ValueError(
+            f"alpha_gae and alpha_cf must be >= 0, got "
+            f"{cfg.ppo.alpha_gae} and {cfg.ppo.alpha_cf}")
+    if cfg.ppo.pg_mode.startswith("cf") and cfg.ppo.alpha_gae == 0.0 == cfg.ppo.alpha_cf:
+        raise ValueError("alpha_gae and alpha_cf are both 0 -- the actor would never update")
     if not 0.0 < cfg.ppo.cf_subsample <= 1.0:
         raise ValueError(f"cf_subsample must be in (0, 1], got {cfg.ppo.cf_subsample}")
     if cfg.ppo.cf_restore not in ("exact", "fast"):
@@ -513,6 +542,9 @@ def _validate(cfg: ExperimentConfig) -> None:
         )
     if cfg.ppo.ent_mode not in ("fixed", "adaptive"):
         raise ValueError(f"ent_mode must be fixed|adaptive, got {cfg.ppo.ent_mode!r}")
+    if cfg.env.success_on not in ("terminated", "positive_reward"):
+        raise ValueError(
+            f"success_on must be terminated|positive_reward, got {cfg.env.success_on!r}")
     if cfg.env.layout_seed_mode not in ("cycle", "random"):
         raise ValueError(f"layout_seed_mode must be cycle|random, got {cfg.env.layout_seed_mode!r}")
     if cfg.ppo.encoder == "cnn" and cfg.env.obs_norm != "image":

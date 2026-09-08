@@ -1,0 +1,147 @@
+# PPO-CF experiment on MiniGrid-RedBlueDoors-6x6-v0.
+#
+# ONE config drives ALL THREE arms. The notebook overrides only `ppo.pg_mode`
+# (gae / cf_all_action / cf_shuffled), so every other hyperparameter is
+# identical by construction and the only difference between runs is the policy
+# gradient. Plan rule 4 requires exactly that.
+#
+# WHY THIS ENV IS A BETTER CF TEST THAN DOORKEY. DoorKey's difficulty is
+# EXPLORATION -- finding the key at all -- which a counterfactual credit signal
+# was never going to fix, and which is why 8x8 defeated both arms. RedBlueDoors
+# is the opposite: on a 32k-frame smoke run the agent already opened the blue
+# door in 88% of episodes, but in the LOSING order 58 times out of 84. The
+# doors are easy to reach; the difficulty is knowing which one to open first.
+# That is a credit-assignment problem, which is what the oracle addresses.
+#
+# The counterfactual is also unusually well posed here: from a state where the
+# red door is open, `toggle` at the blue door terminates with reward ~0.99,
+# while every other action gets ~0. A one-step-lookahead oracle can see that
+# difference. Contrast DoorKey, where reward is purely terminal and 99.46% of
+# states had no reward within reach.
+#
+# CORRECTNESS NOTE, found while building this. `Grid.decode` creates new
+# WorldObj instances, so restoring a state used to leave `env.red_door` and
+# `env.blue_door` pointing at stale objects from the previous reset -- and
+# RedBlueDoorEnv.step() reads exactly those. The winning move measured 0.9938
+# live and 0.0000 after a restore, and `check_replay` still passed because a
+# random policy essentially never produces that transition. `set_minigrid_state`
+# now re-binds those attributes. Section 1 of the notebook tests it directly.
+
+env:
+  env_id: MiniGrid-RedBlueDoors-6x6-v0
+  n_envs: 16
+  # 400, not MiniGrid's own 720. Coverage of the counterfactual estimator is
+  # roughly P(a branch reaches a terminal within cf_horizon), so a shorter
+  # episode raises it mechanically and shortens the credit chain at the same
+  # time. This truncates via TimeLimit and does NOT touch `unwrapped.max_steps`,
+  # which stays 720 -- so the success reward 1 - 0.9*(steps/720) is unchanged
+  # and returns remain comparable with earlier runs. Episodes that used to run
+  # 400-720 steps now truncate, which costs a few very slow solves.
+  max_episode_steps: 400
+  obs_norm: image
+  fully_observable: true       # the oracle needs an MDP; do not change
+  success_on: positive_reward  # <- see note 1 above
+  layout_seeds: null
+  layout_seed_mode: cycle
+
+ppo:
+  total_timesteps: 1000000      # the CF arm is ~6x slower; see the notebook's estimate
+  n_steps: 512                 # zoo's value for this env; 16 x 512 = 8192
+  n_epochs: 4
+  n_minibatches: 8             # -> minibatch 1024
+  learning_rate: 0.001
+  anneal_lr: false
+  optim_eps: 1.0e-8
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_coef: 0.2
+  clip_vloss: true
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: null
+
+  norm_adv: batch
+  norm_adv_min_std: 1.0e-06
+
+  pg_mode: cf_all_action       # the notebook overrides this per arm
+  cf_restore: fast             # verified bit-identical to 'exact' in section 1
+  cf_validate: true
+  # L_actor = alpha_gae*L_PPO + alpha_cf*L_CF.
+  # NOT the plan's 0.5/0.5. Because sum_a pi_old(a|s) A_CF(s,a) = 0 exactly, the
+  # CF term is zero-mean under the behaviour policy: at theta = theta_old it
+  # cannot bias the gradient, only its variance. So it goes in as a CONTROL
+  # VARIATE on top of a full-strength PPO gradient rather than replacing half of
+  # one. At 0.5/0.5 a working PPO term was being halved to make room for a
+  # signal measured at correlation -0.050 with the advantage. Scan alpha_cf
+  # 0.05 / 0.25 once the horizon fix is confirmed.
+  alpha_gae: 1.0
+  alpha_cf: 0.1
+  # 64, not 16. MEASURED on a trained 6x6 policy, 150 states, corr(A_CF, GAE):
+  #     H      coverage   mean|A_CF|   corr
+  #     16      0.000       0.0046    -0.050   <- the old setting
+  #     32      0.002       0.0053    +0.032
+  #     64      0.015       0.0070    +0.289   <- here
+  #    128      0.028       0.0083    +0.161
+  #    256      0.055       0.0070    +0.123
+  # At H=16 coverage is ZERO, so Q_g = gamma^H * V(s_H) and A_CF is nothing but
+  # critic differences -- the same degenerate estimator that failed on DoorKey,
+  # and anti-correlated with the advantage. The decline past 64 is Monte-Carlo
+  # variance at cf_rollouts=2; raise rollouts to 4 before pushing H beyond 128.
+  cf_horizon: 64
+  cf_rollouts: 2               # common random numbers across actions
+  # 0.025 pays for the 4x horizon at constant cost: the branch budget is
+  # H * rollouts * subsample, and 16*2*0.10 == 64*2*0.025 == 3.2, so throughput
+  # and the ~22 min/seed are unchanged. Fewer states with real reward coverage
+  # beats more states with none -- a zero-coverage state does not contribute
+  # nothing, it contributes critic noise weighted by alpha_cf.
+  cf_subsample: 0.025
+  cf_bootstrap_tail: true
+  cf_branch_envs: 256
+
+  ent_mode: fixed
+  prob_floor_start: 0.0
+  prob_floor_end: 0.0
+
+  encoder: cnn
+  share_encoder: true
+  hidden_sizes: [64]
+  activation: tanh
+  separate_grad_clip: false
+  device: cpu
+
+run:
+  run_name: rbd6x6            # the notebook appends _gae / _cf / _shuf
+  seeds: [0, 1, 2]
+  trajectory_stride: 4
+  compact_trajectory_dtypes: true
+  log_every_updates: 10
+  record_trajectories: true
+  eval_every_updates: 0
+  eval_episodes: 20
+  init_from: null              # nothing below this env to warm-start from
+
+reward:
+  # Must stay off: config._validate refuses shaping together with
+  # pg_mode=cf_all_action, because the oracle reads the RAW environment reward
+  # while the critic would have been trained on the shaped one.
+  potential_shaping: false
+  potential_key: 0.0
+  potential_door: 0.0
+  count_bonus_coef: 0.0
+
+oracle:
+  checkpoint_fraction: 0.75
+
+note: |
+  7 actions (log 7 = 1.946 nats). `pickup` (3) and `drop` (4) are useless here
+  -- there is nothing to carry -- while `toggle` (5) is the only action that can
+  ever open a door, so it is the one to watch in the per-action panel. Reward on
+  success is 1 - 0.9*(steps/max_steps) as in DoorKey.
+
+  The ordering constraint is what makes this interesting: a policy that learns
+  "toggle any door you see" will open blue first roughly half the time and end
+  the episode with nothing. Expect subgoal1 (red) to rise well before success,
+  and watch the gap between subgoal2 (blue open) and success -- unlike DoorKey,
+  where opening the door almost guaranteed finishing, here blue can be opened in
+  the losing order.

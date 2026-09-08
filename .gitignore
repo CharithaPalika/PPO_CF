@@ -8,3 +8,10 @@ to_delete/
 .DS_Store
 *.npz
 *.pt
+
+# cluster pipeline
+logs/
+slurm/env.sh
+artifacts/wandb/
+artifacts/chunks/
+artifacts/manifests/

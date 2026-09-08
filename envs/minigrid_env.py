@@ -112,6 +112,37 @@ def set_minigrid_state(env: gym.Env, state: np.ndarray, elapsed_steps: int | Non
             obj.cur_pos = np.array([-1, -1])
 
     u.step_count = int(tail[5]) if elapsed_steps is None else int(elapsed_steps)
+    # RE-BIND THE ENVIRONMENT'S OWN OBJECT REFERENCES TO THE RESTORED GRID.
+    #
+    # `Grid.decode` builds NEW WorldObj instances, so any attribute the env
+    # holds onto still points at the objects from the last reset. RedBlueDoorEnv
+    # keeps `self.red_door` / `self.blue_door` and reads them inside step():
+    #
+    #     red_door_opened_before = self.red_door.is_open
+    #     ...
+    #     if blue_door_opened_after and red_door_opened_before: reward, terminated
+    #
+    # Without this rebinding those attributes are frozen at whatever the last
+    # reset produced, so after a restore the winning move pays nothing and does
+    # not terminate. Measured before the fix: toggling blue with red already
+    # open gave reward 0.9938 / terminated True live, and 0.0000 / False after a
+    # restore. The oracle would have silently missed the only reward the task
+    # has, and `check_replay` would still have passed, because a random policy
+    # essentially never produces that transition.
+    from minigrid.core.world_object import WorldObj
+
+    by_key: dict[tuple[str, str], list] = {}
+    for j in range(grid.height):
+        for i in range(grid.width):
+            cell = grid.get(i, j)
+            if cell is not None:
+                by_key.setdefault((cell.type, cell.color), []).append(cell)
+    for attr, obj in list(vars(u).items()):
+        if attr == "carrying" or not isinstance(obj, WorldObj):
+            continue
+        match = by_key.get((obj.type, obj.color))
+        if match and len(match) == 1:      # unambiguous: exactly one such object
+            setattr(u, attr, match[0])
 
 
 def decode_summary(env: gym.Env) -> dict:

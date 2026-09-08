@@ -1,0 +1,134 @@
+# PPO-CF experiment on MiniGrid-RedBlueDoors-8x8-v0.
+#
+# ONE config drives ALL THREE arms. The notebook overrides only `ppo.pg_mode`
+# (gae / cf_all_action / cf_shuffled), so every other hyperparameter is
+# identical by construction and the only difference between runs is the policy
+# gradient. Plan rule 4 requires exactly that.
+#
+# WHY THIS ENV IS A BETTER CF TEST THAN DOORKEY. DoorKey's difficulty is
+# EXPLORATION -- finding the key at all -- which a counterfactual credit signal
+# was never going to fix, and which is why 8x8 defeated both arms. RedBlueDoors
+# is the opposite: on a 32k-frame smoke run the agent already opened the blue
+# door in 88% of episodes, but in the LOSING order 58 times out of 84. The
+# doors are easy to reach; the difficulty is knowing which one to open first.
+# That is a credit-assignment problem, which is what the oracle addresses.
+#
+# The counterfactual is also unusually well posed here: from a state where the
+# red door is open, `toggle` at the blue door terminates with reward ~0.99,
+# while every other action gets ~0. A one-step-lookahead oracle can see that
+# difference. Contrast DoorKey, where reward is purely terminal and 99.46% of
+# states had no reward within reach.
+#
+# CORRECTNESS NOTE, found while building this. `Grid.decode` creates new
+# WorldObj instances, so restoring a state used to leave `env.red_door` and
+# `env.blue_door` pointing at stale objects from the previous reset -- and
+# RedBlueDoorEnv.step() reads exactly those. The winning move measured 0.9938
+# live and 0.0000 after a restore, and `check_replay` still passed because a
+# random policy essentially never produces that transition. `set_minigrid_state`
+# now re-binds those attributes. Section 1 of the notebook tests it directly.
+
+env:
+  env_id: MiniGrid-RedBlueDoors-8x8-v0
+  n_envs: 16
+  max_episode_steps: null      # MiniGrid's own limit: 1280
+  obs_norm: image
+  fully_observable: true       # the oracle needs an MDP; do not change
+  success_on: positive_reward  # <- see note 1 above
+  layout_seeds: null
+  layout_seed_mode: cycle
+
+ppo:
+  total_timesteps: 2000000      # see the cost table below
+  n_steps: 512                 # zoo's value for this env; 16 x 512 = 8192
+  n_epochs: 4
+  n_minibatches: 8             # -> minibatch 1024
+  learning_rate: 0.001
+  anneal_lr: false
+  optim_eps: 1.0e-8
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_coef: 0.2
+  clip_vloss: true
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: null
+
+  norm_adv: batch
+  norm_adv_min_std: 1.0e-06
+
+  pg_mode: cf_all_action       # the notebook overrides this per arm
+  cf_restore: fast             # verified bit-identical to 'exact' in section 1
+  cf_validate: true
+  alpha_gae: 1.0 #0.5               # L_actor = alpha_gae*L_PPO + alpha_cf*L_CF
+  alpha_cf: 0.5                # 0.5/0.5 == the plan's Eq (6) alpha = 0.5
+  cf_horizon: 32               # episodes average ~887 steps here vs ~720 at 6x6
+  cf_rollouts: 2               # common random numbers across actions
+  cf_subsample: 0.05           # halved vs 6x6 -- see the cost table
+  cf_bootstrap_tail: true
+  cf_branch_envs: 256
+
+  ent_mode: fixed
+  prob_floor_start: 0.0
+  prob_floor_end: 0.0
+
+  encoder: cnn
+  share_encoder: true
+  hidden_sizes: [64]
+  activation: tanh
+  separate_grad_clip: false
+  device: cpu
+
+run:
+  run_name: rbd8x8            # the notebook appends _gae / _cf / _shuf
+  seeds: [0, 1]                # 2 seeds: 3 would be ~5.5 h of CF wall clock
+  trajectory_stride: 4
+  compact_trajectory_dtypes: true
+  log_every_updates: 10
+  record_trajectories: true
+  eval_every_updates: 0
+  eval_episodes: 20
+  init_from: null              # nothing below this env to warm-start from
+
+reward:
+  # Must stay off: config._validate refuses shaping together with
+  # pg_mode=cf_all_action, because the oracle reads the RAW environment reward
+  # while the critic would have been trained on the shaped one.
+  potential_shaping: false
+  potential_key: 0.0
+  potential_door: 0.0
+  count_bonus_coef: 0.0
+
+# COST, MEASURED on this environment at 16384 frames per setting:
+#
+#   arm / setting              steps/s   400k frames
+#   gae                           952      7 min/seed
+#   cf  H=32  subsample 0.10       66    101 min/seed
+#   cf  H=32  subsample 0.05      124     54 min/seed   <- this config
+#   cf  H=16  subsample 0.05      215     31 min/seed
+#
+# So the full three-arm, two-seed experiment is roughly:
+#   gae 2 x 7 min + cf 2 x 54 min + shuffled 2 x 54 min  ~=  3.8 hours.
+#
+# The oracle is 14x slower than plain PPO here, against 6x at 6x6, because
+# Q_g branches run up to cf_horizon steps and 8x8 episodes are longer. If that
+# is too slow, drop cf_horizon to 16 first (31 min/seed) and watch
+# cf_reward_coverage -- a shorter horizon sees reward less often, and coverage
+# near zero means the estimator has degenerated back towards the one-step form
+# that failed on DoorKey.
+
+oracle:
+  checkpoint_fraction: 0.75
+
+note: |
+  7 actions (log 7 = 1.946 nats). `pickup` (3) and `drop` (4) are useless here
+  -- there is nothing to carry -- while `toggle` (5) is the only action that can
+  ever open a door, so it is the one to watch in the per-action panel. Reward on
+  success is 1 - 0.9*(steps/max_steps) as in DoorKey.
+
+  The ordering constraint is what makes this interesting: a policy that learns
+  "toggle any door you see" will open blue first roughly half the time and end
+  the episode with nothing. Expect subgoal1 (red) to rise well before success,
+  and watch the gap between subgoal2 (blue open) and success -- unlike DoorKey,
+  where opening the door almost guaranteed finishing, here blue can be opened in
+  the losing order.

@@ -65,7 +65,8 @@ ppo:
   #     H=32   coverage 0.206   53 ms/state
   # `cf_reward_coverage` is logged every update -- if it sits near zero the
   # estimator has degenerated back to a critic difference and no tuning helps.
-  cf_alpha: 0.7 #0.5                # Eq (6). 1.0 (pure replacement) is NOT the spec
+  alpha_gae: 1.0 #0.5               # L_actor = alpha_gae*L_PPO + alpha_cf*L_CF
+  alpha_cf: 0.2 #0.5                # 0.5/0.5 == the plan's Eq (6) alpha = 0.5
   cf_horizon: 16
   cf_rollouts: 2               # common random numbers across actions
   cf_subsample: 0.10           # ~205 of 2048 states per rollout; cost-forced
@@ -103,7 +104,7 @@ run:
   # identical policy, so seeds differ only in environment and sampling streams.
   # If you later run the plain curriculum at more seeds, change this to
   # `seed_{seed}` to restore per-seed initialisation diversity.
-  init_from: runs/doorkey6x6/seed_0/checkpoints/ckpt_100.pt
+  init_from: null #runs/doorkey6x6/seed_0/checkpoints/ckpt_100.pt
 
 reward:
   # Must stay off. The oracle computes Q_CF from the RAW environment reward; if

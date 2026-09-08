@@ -190,6 +190,7 @@ class EnvPool:
         env_kwargs: dict[str, Any] | None = None,
         layout_seeds: Sequence[int] | None = None,
         layout_seed_mode: str = "cycle",
+        success_on: str = "terminated",
         reward_cfg: Any = None,
         gamma: float = 0.99,
     ):
@@ -205,6 +206,7 @@ class EnvPool:
         # task back into a single MDP, which is all NB02-06 needs.
         self.layout_seeds = None if layout_seeds is None else [int(s) for s in layout_seeds]
         self.layout_seed_mode = layout_seed_mode
+        self.success_on = success_on
         self._layout_rng = np.random.default_rng(seed)
         self._layout_cursor = np.arange(n_envs)
 
@@ -245,8 +247,8 @@ class EnvPool:
                 for i in range(n_envs)
             ]
         # per-episode sub-goal latches, mirrored from the probes
-        self.episode_key = np.zeros(n_envs, dtype=bool)
-        self.episode_door = np.zeros(n_envs, dtype=bool)
+        self.episode_subgoal1 = np.zeros(n_envs, dtype=bool)
+        self.episode_subgoal2 = np.zeros(n_envs, dtype=bool)
 
     # -- layout ------------------------------------------------------------- #
 
@@ -267,8 +269,8 @@ class EnvPool:
             self.probes[i].reset_probe()
         if self.shapers is not None:
             self.shapers[i].on_reset()
-        self.episode_key[i] = False
-        self.episode_door[i] = False
+        self.episode_subgoal1[i] = False
+        self.episode_subgoal2[i] = False
         return np.asarray(obs, dtype=np.float32).reshape(-1)
 
     def set_progress(self, frac: float) -> None:
@@ -327,9 +329,9 @@ class EnvPool:
 
             # Sub-goal latches BEFORE any reset, so they describe this episode.
             if self.probes is not None:
-                k, d = self.probes[i].observe()
-                self.episode_key[i] |= k
-                self.episode_door[i] |= d
+                g1, g2 = self.probes[i].observe()
+                self.episode_subgoal1[i] |= g1
+                self.episode_subgoal2[i] |= g2
 
             # The buffer sees the shaped reward (what the critic is trained on);
             # `episode_return` accumulates the RAW environment reward, so the
@@ -349,15 +351,20 @@ class EnvPool:
                     "episode_id": int(self.episode_id[i]),
                     "return": float(self.episode_return[i]),
                     "length": int(self.episode_length[i]),
-                    # `success` == MDP termination. MountainCar terminates only
-                    # at the goal; Taxi terminates only on a correct dropoff;
-                    # DoorKey terminates only on reaching the goal square.
-                    "success": bool(term),
-                    # DoorKey sub-goals. The rungs between "did nothing" and
-                    # "solved", which is the only way to tell the failure modes
-                    # apart while success is pinned at zero.
-                    "picked_key": bool(self.episode_key[i]),
-                    "opened_door": bool(self.episode_door[i]),
+                    # See EnvConfig.success_on. "terminated" is right wherever
+                    # the only way to end an episode is to succeed; RedBlueDoors
+                    # also terminates on the WRONG door order with reward 0, so
+                    # it needs the positive-return test.
+                    "success": (bool(term and self.episode_return[i] > 0)
+                                if self.success_on == "positive_reward" else bool(term)),
+                    # The two sub-goals between "did nothing" and "solved" --
+                    # the only way to tell failure modes apart while success is
+                    # pinned at zero. What they MEAN is environment-specific
+                    # (DoorKey: key picked up / door opened. RedBlueDoors: red
+                    # opened / blue opened), so the names here are deliberately
+                    # generic and the notebooks supply the labels.
+                    "subgoal1": bool(self.episode_subgoal1[i]),
+                    "subgoal2": bool(self.episode_subgoal2[i]),
                 })
                 reset_obs[i] = self._reset_env(i, self._next_layout_seed(i))
                 self.episode_id[i] = self._new_episode_id()

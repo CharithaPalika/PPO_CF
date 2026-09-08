@@ -31,6 +31,7 @@ from dataio.trajectory import TrajectoryRecorder
 from envs.env_pool import EnvPool, make_env
 from envs.scaling import make_scaler
 from utils.logging import ScalarLogger
+from utils.wandb_sink import make_sinks
 from utils.seeding import set_global_seed
 
 
@@ -63,6 +64,7 @@ class PPOTrainer:
             env_kwargs=env_kwargs,
             layout_seeds=cfg.env.layout_seeds,
             layout_seed_mode=cfg.env.layout_seed_mode,
+            success_on=cfg.env.success_on,
             reward_cfg=cfg.reward,
             gamma=cfg.ppo.gamma,
         )
@@ -123,7 +125,10 @@ class PPOTrainer:
         # when no trajectory dataset is being written.
         self._needs_sim_state = self.recorder is not None or self.oracle is not None
         self._zero_sim = np.zeros((cfg.env.n_envs, self.pool.sim_state_dim), dtype=np.float64)
-        self.logger = ScalarLogger(self.out_dir / "scalars.csv")
+        # `make_sinks` returns [] unless PPO_CF_WANDB=1, so notebooks are
+        # unaffected. A sink can never raise into the loop; see utils/logging.py.
+        self.logger = ScalarLogger(self.out_dir / "scalars.csv",
+                                   sinks=make_sinks(cfg, seed))
 
         # rolling episode stats
         self._ep_returns: deque[float] = deque(maxlen=100)
@@ -132,8 +137,11 @@ class PPOTrainer:
         # DoorKey sub-goals. Success alone is useless as a progress signal on a
         # sparse task -- it can sit at zero for millions of frames. These say
         # WHICH rung the policy is stuck on.
-        self._ep_key: deque[float] = deque(maxlen=100)
-        self._ep_door: deque[float] = deque(maxlen=100)
+        # What the two sub-goals MEAN is environment-specific (DoorKey: key
+        # picked up / door opened. RedBlueDoors: red opened / blue opened), so
+        # the names are generic and the notebooks supply the labels.
+        self._ep_subgoal1: deque[float] = deque(maxlen=100)
+        self._ep_subgoal2: deque[float] = deque(maxlen=100)
         self.episode_log: list[dict] = []
         self.first_success_step: int | None = None
         self._success_ema: float = 0.0
@@ -205,8 +213,8 @@ class PPOTrainer:
                 self._ep_returns.append(ep["return"])
                 self._ep_lengths.append(ep["length"])
                 self._ep_success.append(float(ep["success"]))
-                self._ep_key.append(float(ep.get("picked_key", float("nan"))))
-                self._ep_door.append(float(ep.get("opened_door", float("nan"))))
+                self._ep_subgoal1.append(float(ep.get("subgoal1", float("nan"))))
+                self._ep_subgoal2.append(float(ep.get("subgoal2", float("nan"))))
                 self.episode_log.append({**ep, "global_step": self.global_step})
                 if ep["success"] and self.first_success_step is None:
                     self.first_success_step = self.global_step
@@ -468,21 +476,24 @@ class PPOTrainer:
                     -mb_adv * torch.clamp(ratio, 1 - cfg.ppo.clip_coef, 1 + cfg.ppo.clip_coef),
                 )
 
-                # Eq (6): L_actor = (1 - alpha) L_PPO + alpha L_CF, alpha = 0.5.
-                # alpha = 1.0 (pure replacement) is NOT the specification, and it
-                # is what made the first PPO-CF run degrade monotonically.
+                #     L_actor = alpha_gae * L_PPO + alpha_cf * L_CF
                 #
-                # The blend is applied PER ROW, only where a counterfactual
+                # Independent weights rather than the convex (1 - alpha, alpha)
+                # of Eq (6), so each term can be moved on its own; the defaults
+                # 0.5 / 0.5 reproduce the plan exactly.
+                #
+                # The weighting is applied PER ROW, only where a counterfactual
                 # exists. Eq (5) averages L_CF over the whole batch; we can only
-                # afford it on a subsample, and blending globally would instead
-                # halve the PPO term on every row while the counterfactual
-                # informed 5% of them -- handicapping the treatment arm relative
+                # afford it on a subsample, and weighting globally would instead
+                # scale the PPO term on every row while the counterfactual
+                # informed 10% of them -- handicapping the treatment arm relative
                 # to the control for a reason that has nothing to do with the
-                # hypothesis. Rows without a counterfactual get plain PPO, so
-                # the two arms are identical wherever the oracle is silent.
+                # hypothesis. Rows without a counterfactual get plain PPO at full
+                # weight, so the two arms are identical wherever the oracle is
+                # silent.
                 if cf and cf_row is not None:
                     row = ppo_row.clone()
-                    row[m] = (1.0 - cfg.ppo.cf_alpha) * ppo_row[m] + cfg.ppo.cf_alpha * cf_row
+                    row[m] = cfg.ppo.alpha_gae * ppo_row[m] + cfg.ppo.alpha_cf * cf_row
                     pg_loss = row.mean()
                 else:
                     pg_loss = ppo_row.mean()
@@ -746,8 +757,10 @@ class PPOTrainer:
                     # "solved". On DoorKey, key_rate rising while door_rate
                     # stays flat is a completely different failure from both
                     # staying flat, and they need opposite responses.
-                    "key_rate_100": float(np.mean(self._ep_key)) if self._ep_key else float("nan"),
-                    "door_rate_100": float(np.mean(self._ep_door)) if self._ep_door else float("nan"),
+                    "subgoal1_rate_100": (float(np.mean(self._ep_subgoal1))
+                                          if self._ep_subgoal1 else float("nan")),
+                    "subgoal2_rate_100": (float(np.mean(self._ep_subgoal2))
+                                          if self._ep_subgoal2 else float("nan")),
                     "n_episodes": len(self.episode_log),
                     "entropy_target": float(getattr(self, "_entropy_target", float("nan"))),
                     "success_ema": float(self._success_ema),
@@ -763,7 +776,7 @@ class PPOTrainer:
                     print(
                         f"  upd {update:>5}/{self.n_updates}  step {self.global_step:>8,}  "
                         f"ret {row['mean_return_100']:>7.3f}  succ {row['success_rate_100']:.2f}  "
-                        f"key {row['key_rate_100']:.2f} door {row['door_rate_100']:.2f}  "
+                        f"sg1 {row['subgoal1_rate_100']:.2f} sg2 {row['subgoal2_rate_100']:.2f}  "
                         f"ent {row['entropy']:.3f}  advstd {row['adv_std_raw']:.2e}  "
                         f"ev {row['explained_variance']:>6.3f}  {row['sps']:,} sps",
                         flush=True,

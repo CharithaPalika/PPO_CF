@@ -268,7 +268,10 @@ def validate(traj: Trajectories, n_actions: int, verbose: bool = True) -> list[s
         n_succ = int(d["terminated"].sum())
         print(f"  rows            {n:,}")
         print(f"  episodes        {n_ep:,}")
-        print(f"  terminated rows {n_succ:,}   (MDP termination = task solved)")
+        # NOT the same as "solved" everywhere: RedBlueDoors terminates on the
+        # wrong door order too, with reward 0. `success` in episodes.csv is the
+        # authority (see EnvConfig.success_on); this is the raw MDP flag.
+        print(f"  terminated rows {n_succ:,}   (MDP termination, not necessarily a success)")
         print(f"  truncated rows  {int(d['truncated'].sum()):,}")
         print(f"  problems        {len(problems)}")
 

@@ -47,49 +47,79 @@ class MiniGridProbe:
 
     def __init__(self, env):
         self.env = env
-        self.door_pos: tuple[int, int] | None = None
-        self.ever_key = False
-        self.ever_door = False
+        self.doors: list[tuple[tuple[int, int], str]] = []
+        self.mode = "key_door"
+        self.sub1 = False
+        self.sub2 = False
         self.reset_probe()
 
     def reset_probe(self) -> None:
-        self.door_pos = self._find_door()
-        self.ever_key = False
-        self.ever_door = False
+        self.doors, has_key_obj = self._scan()
+        # DoorKey has one door and a key. RedBlueDoors has two doors and no key,
+        # and its sub-goals are "red opened" then "blue opened" IN THAT ORDER.
+        # Both cases return a 2-tuple from observe(), so nothing downstream
+        # needs to know which environment it is looking at.
+        self.mode = "key_door" if has_key_obj else "two_doors"
+        self.sub1 = False
+        self.sub2 = False
 
-    def _find_door(self) -> tuple[int, int] | None:
+    def _scan(self):
         u = self.env.unwrapped
         grid = getattr(u, "grid", None)
+        doors, has_key = [], False
         if grid is None:
-            return None
+            return doors, has_key
         for j in range(grid.height):
             for i in range(grid.width):
                 cell = grid.get(i, j)
-                if cell is not None and cell.type == "door":
-                    return (i, j)
-        return None
+                if cell is None:
+                    continue
+                if cell.type == "door":
+                    doors.append(((i, j), cell.color))
+                elif cell.type == "key":
+                    has_key = True
+        # deterministic order: red before blue, else grid order
+        order = {"red": 0, "blue": 1}
+        doors.sort(key=lambda d: order.get(d[1], 2 + d[0][0]))
+        return doors, has_key
+
+    @property
+    def door_pos(self):
+        """Kept for callers that only care about the first door."""
+        return self.doors[0][0] if self.doors else None
 
     def has_key(self) -> bool:
         carrying = getattr(self.env.unwrapped, "carrying", None)
         return carrying is not None and carrying.type == "key"
 
-    def door_open(self) -> bool:
-        if self.door_pos is None:
+    def _door_open(self, idx: int) -> bool:
+        if idx >= len(self.doors):
             return False
-        cell = self.env.unwrapped.grid.get(*self.door_pos)
+        cell = self.env.unwrapped.grid.get(*self.doors[idx][0])
         return bool(cell is not None and getattr(cell, "is_open", False))
 
+    def door_open(self) -> bool:
+        return self._door_open(0)
+
     def observe(self) -> tuple[bool, bool]:
-        """(has_key, door_open) now, also latching the per-episode 'ever' flags."""
-        k, d = self.has_key(), self.door_open()
-        self.ever_key |= k
-        self.ever_door |= d
-        return k, d
+        """(subgoal1, subgoal2) now, latching the per-episode flags.
+
+        key_door  -> (carrying the key, the door is open)
+        two_doors -> (door 1 is open,   door 2 is open)     [red, then blue]
+        """
+        if self.mode == "key_door":
+            g1, g2 = self.has_key(), self._door_open(0)
+        else:
+            g1, g2 = self._door_open(0), self._door_open(1)
+        self.sub1 |= g1
+        self.sub2 |= g2
+        return g1, g2
 
     def abstract_state(self) -> tuple[int, int, int, int, int]:
         u = self.env.unwrapped
-        k, d = self.has_key(), self.door_open()
-        return (int(u.agent_pos[0]), int(u.agent_pos[1]), int(u.agent_dir), int(k), int(d))
+        g1, g2 = (self.has_key(), self._door_open(0)) if self.mode == "key_door" \
+            else (self._door_open(0), self._door_open(1))
+        return (int(u.agent_pos[0]), int(u.agent_pos[1]), int(u.agent_dir), int(g1), int(g2))
 
 
 class RewardShaper:
@@ -115,8 +145,8 @@ class RewardShaper:
     def _phi(self) -> float:
         if not self.cfg.potential_shaping or self.probe is None:
             return 0.0
-        k, d = self.probe.has_key(), self.probe.door_open()
-        return self.cfg.potential_key * float(k) + self.cfg.potential_door * float(d)
+        g1, g2 = self.probe.observe()
+        return self.cfg.potential_key * float(g1) + self.cfg.potential_door * float(g2)
 
     # -- count bonus ------------------------------------------------------- #
 

@@ -64,7 +64,8 @@ ppo:
   #     H=32   coverage 0.206   53 ms/state
   # `cf_reward_coverage` is logged every update -- if it sits near zero the
   # estimator has degenerated back to a critic difference and no tuning helps.
-  cf_alpha: 0.5                # Eq (6). 1.0 (pure replacement) is NOT the spec
+  alpha_gae: 0.5               # L_actor = alpha_gae*L_PPO + alpha_cf*L_CF
+  alpha_cf: 0.5                # 0.5/0.5 == the plan's Eq (6) alpha = 0.5
   cf_horizon: 16
   cf_rollouts: 2               # common random numbers across actions
   cf_subsample: 0.10           # ~205 of 2048 states per rollout; cost-forced

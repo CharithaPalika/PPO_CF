@@ -51,17 +51,21 @@ described as such.
 
 | stage | env config | frames | seeds | units |
 |---|---|---|---|---|
-| `E1_RBD6` | `redbluedoors6x6_cf.yaml` | 1M | 0–9 | 30 |
+| `E1_RBD6` | `redbluedoors6x6_cf.yaml` | 2M | 0–4 | 15 |
 | `E1_RBD8` | `redbluedoors8x8_cf.yaml` | 2M | 0–4 | 15 |
+
+Seeds and frame budget are matched across the two stages on purpose, so the only
+thing that differs is the environment. Note `redbluedoors6x6_cf.yaml`'s own budget is
+1M (rl-baselines3-zoo's entry for that env) and 2M is a deliberate override.
 
 `E1_RBD6` chains into `E1_RBD8` automatically; `PART_END` is where it stops.
 
-Only two things are overridden per stage, both in `pipeline/stages.py` and nowhere
-else: `ppo.cf_horizon: 64` on 8x8 (the 6x6 sweep measured coverage 0.002 at H=32,
-i.e. the degenerate critic-difference estimator), and `run.log_every_updates: 2`
-(the default 10 writes one scalars row every 82k frames, which would quantise a
-"frames to 50%" statistic whose gaps of interest are ~40k). Everything else comes
-from the YAML as committed.
+Only three things are overridden per stage, all in `pipeline/stages.py` and nowhere
+else: `ppo.total_timesteps: 2_000_000` (matching the two stages), `ppo.cf_horizon: 64`
+on 8x8 (the 6x6 sweep measured coverage 0.002 at H=32, i.e. the degenerate
+critic-difference estimator), and `run.log_every_updates: 2` (the default 10 writes
+one scalars row every 82k frames, which would quantise a "frames to 50%" statistic
+whose gaps of interest are ~40k). Everything else comes from the YAML as committed.
 
 ## What does not go in here
 

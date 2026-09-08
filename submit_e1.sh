@@ -4,9 +4,9 @@
 #   ./submit_e1.sh          # 16 chunks (default)
 #   ./submit_e1.sh 8        # 8 chunks
 #
-# Submits E1_RBD6 (RedBlueDoors-6x6, 1M frames, seeds 0-9) and chains
-# automatically into E1_RBD8 (RedBlueDoors-8x8, 2M frames, seeds 0-4) when the
-# first stage completes. Three arms each: gae / cf / shuf.
+# Submits E1_RBD6 (RedBlueDoors-6x6) and chains automatically into E1_RBD8
+# (RedBlueDoors-8x8) when the first stage completes. Both stages: 2M frames,
+# seeds 0-4, three arms each (gae / cf / shuf) -- 15 units per stage.
 #
 # PART_END (the last argument to submit_stage) is the safety catch: the analyse
 # job chains to the next stage automatically and PART_END is where it stops.

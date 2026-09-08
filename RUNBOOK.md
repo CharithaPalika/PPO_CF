@@ -30,7 +30,7 @@ Each step is cheap and rules out a class of failure that is much harder to diagn
 | 2 | `scontrol show partition <name>` | the walltime cap. `02_run_chunks.sbatch` asks for **12 h** |
 | 3 | `sacctmgr show assoc user=$USER format=account,maxjobs,maxsubmit` | your caps → `MAX_SUBMIT` and `CONCURRENCY` |
 | 4 | `sinfo -o "%20N %10c %10m %25f"` | node families and features for `--constraint` |
-| 5 | `df -h ~` and your site's quota command | home is usually NFS and small. This experiment writes ~160 MB |
+| 5 | `df -h ~` and your site's quota command | home is usually NFS and small. This experiment writes ~110 MB |
 | 6 | your site's docs | priority bands — many clusters give a large bonus below a walltime threshold |
 
 Then **edit two things**:
@@ -137,19 +137,20 @@ of `submit_stage` in `submit_e1.sh` from `"E1_RBD8"` to `"E1_RBD6"`.
 
 ### What it costs
 
-Measured from this repo's own `runs/*/summary.json`:
+Measured from this repo's own `runs/*/summary.json`, scaled to 2M frames:
 
 | stage | arm | frames | per seed | seeds | subtotal |
 |---|---|---|---|---|---|
-| `E1_RBD6` | gae | 1M | ~13 min | 10 | 2.2 h |
-| `E1_RBD6` | cf | 1M | ~45 min | 10 | 7.5 h |
-| `E1_RBD6` | shuf | 1M | ~45 min | 10 | 7.5 h |
+| `E1_RBD6` | gae | 2M | ~25 min | 5 | 2.1 h |
+| `E1_RBD6` | cf | 2M | ~1.5 h | 5 | 7.5 h |
+| `E1_RBD6` | shuf | 2M | ~1.5 h | 5 | 7.5 h |
 | `E1_RBD8` | gae | 2M | ~25 min | 5 | 2.1 h |
 | `E1_RBD8` | cf | 2M | ~5.5 h | 5 | 27.5 h |
 | `E1_RBD8` | shuf | 2M | ~5.5 h | 5 | 27.5 h |
 
-**45 units, ~74 core-hours, ~160 MB on disk.** At 16-way concurrency, roughly 6–8 h
-wall clock. The 8x8 CF estimate assumes the doubled branch budget (`cf_horizon` 64 at
+**30 units, ~74 core-hours, ~110 MB on disk.** 15 units per stage, so the default 16
+chunks gives one unit per task. At 16-way concurrency, roughly 6–8 h wall clock per
+stage. The 8x8 CF estimate assumes the doubled branch budget (`cf_horizon` 64 at
 `cf_subsample` 0.05 = 6.4, against 3.2 in the committed YAML).
 
 ---
@@ -250,6 +251,6 @@ wandb sync artifacts/wandb/offline-run-*
   the ledger and the figures, and you analyse locally from those.
 - **No trajectory datasets.** `trajectories.npz` is 25 MB/seed and feeds NB03+ (E2/E3
   distillation), not E1. Set `PPO_CF_RECORD_TRAJECTORIES=1` before submitting if you
-  want them — it costs ~1.1 GB instead of ~160 MB.
+  want them — it costs ~1.5 GB instead of ~110 MB.
 - **No mid-run resume.** A unit is atomic. A killed unit is redone from zero, which is
   why the walltime is sized from the slowest one.

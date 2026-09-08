@@ -57,8 +57,8 @@ ARM_PG_MODE = {
 GROUPS_ALL = ["gae", "cf", "shuf"]
 
 #: Trajectory datasets are 25 MB/seed and feed NB03+ (E2/E3 distillation), not
-#: E1. Off here takes a seed from ~25 MB to ~3.5 MB -- 45 runs, 160 MB instead
-#: of 1.1 GB. Set PPO_CF_RECORD_TRAJECTORIES=1 to turn them back on.
+#: E1. Off here takes a seed from ~25 MB to ~4 MB -- 30 runs, ~110 MB instead
+#: of ~1.5 GB. Set PPO_CF_RECORD_TRAJECTORIES=1 to turn them back on.
 RECORD_TRAJECTORIES = os.environ.get("PPO_CF_RECORD_TRAJECTORIES", "0") == "1"
 
 #: The default `log_every_updates: 10` writes a scalars row every 81,920 frames
@@ -68,24 +68,33 @@ RECORD_TRAJECTORIES = os.environ.get("PPO_CF_RECORD_TRAJECTORIES", "0") == "1"
 #: the live log and the wandb curves usable.
 LOG_EVERY_UPDATES = 2
 
+#: Both stages: 5 paired seeds, 2M frames. Matched on purpose, so the only thing
+#: that differs between E1_RBD6 and E1_RBD8 is the environment.
+SEEDS = list(range(5))
+FRAMES = 2_000_000
+
 STAGES: dict[str, dict] = {
-    # RedBlueDoors-6x6. 1M frames. Measured: gae ~13 min, cf/shuf ~45 min per seed.
+    # RedBlueDoors-6x6. Measured: gae ~25 min, cf/shuf ~90 min per seed at 2M.
+    # The YAML's own budget is 1M (rl-baselines3-zoo's published entry for this
+    # env); 2M is a deliberate override to match 8x8. NOTE this env already
+    # saturates -- rbd6x6_gae/seed_0 reached success 1.0 well before 1M -- so
+    # the second half of the run is mostly flat, which dilutes success AUC
+    # without changing frames_to_50 / frames_to_90.
     "E1_RBD6": {
         "env_config": "redbluedoors6x6_cf",
-        "seeds": list(range(10)),
-        # Nothing to override: the YAML already carries the measured settings
-        # (cf_horizon 64, cf_subsample 0.025, alpha_cf 0.1).
-        "overrides": {},
+        "seeds": SEEDS,
+        # cf_horizon 64, cf_subsample 0.025, alpha_cf 0.1 all come from the YAML.
+        "overrides": {"ppo.total_timesteps": FRAMES},
     },
-    # RedBlueDoors-8x8. 2M frames. cf_horizon raised 32 -> 64 to match the
-    # coverage measurement made on 6x6 (H=32 gave coverage 0.002, i.e. the
-    # degenerate critic-difference estimator). cf_subsample stays 0.05, so the
-    # branch budget DOUBLES from 3.2 to 6.4 and a CF seed costs ~5.5 h instead
-    # of ~2.75 h. That is a deliberate choice, not an oversight.
+    # RedBlueDoors-8x8. cf_horizon raised 32 -> 64 to match the coverage
+    # measurement made on 6x6 (H=32 gave coverage 0.002, i.e. the degenerate
+    # critic-difference estimator). cf_subsample stays 0.05, so the branch
+    # budget DOUBLES from 3.2 to 6.4 and a CF seed costs ~5.5 h instead of
+    # ~2.75 h. That is a deliberate choice, not an oversight.
     "E1_RBD8": {
         "env_config": "redbluedoors8x8_cf",
-        "seeds": list(range(5)),
-        "overrides": {"ppo.cf_horizon": 64},
+        "seeds": SEEDS,
+        "overrides": {"ppo.total_timesteps": FRAMES, "ppo.cf_horizon": 64},
     },
 }
 

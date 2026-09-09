@@ -1,0 +1,148 @@
+# PPO-CF experiment on MiniGrid-LavaGapS6-v0.
+#
+# ONE config drives ALL THREE arms. The notebook overrides only `ppo.pg_mode`
+# (gae / cf_all_action / cf_shuffled), so every other hyperparameter is
+# identical by construction and the only difference between runs is the policy
+# gradient. Plan rule 4 requires exactly that.
+#
+# WHY THIS IS THE MOST FAVOURABLE ENV THE PROJECT HAS TRIED.
+#
+# The recurring failure has been an EMPTY TEACHER: reward is purely terminal and
+# far away, so Q_g branches see nothing, cf_reward_coverage sits at ~0 and A_CF
+# is a critic difference wearing a costume. Measured, 16-step branches under a
+# RANDOM policy, fraction reaching a terminal:
+#
+#     DoorKey-6x6           0.000
+#     Unlock                0.000
+#     RedBlueDoors-8x8      0.020
+#     LavaGapS6             0.235      <- here
+#
+# That is structural. From most states at least one action steps into lava and
+# ends the episode immediately, so the counterfactual "what if I had gone that
+# way" has a real, large, and IRREVERSIBLE answer at almost every state. It is
+# the same shape as RedBlueDoors' wrong-door-order, except reachable everywhere
+# instead of at one decision point.
+#
+# READ cf_terminated_within_horizon, NOT cf_reward_coverage.
+#
+# This is the one gotcha and it will mislead you if unread. In oracle/online.py
+# the coverage flag is `got_reward = (r != 0.0)`. Lava pays reward EXACTLY 0, so
+# a branch that dies in lava does NOT count towards cf_reward_coverage. Only
+# reaching the goal does. So on this env:
+#
+#     cf_reward_coverage             will look LOW  (goal-reaching branches only)
+#     cf_terminated_within_horizon   is the real coverage number
+#
+# A_CF is still perfectly well defined -- the branch that dies gets 0 with no
+# critic bootstrap (termination gets no tail), while the branch that survives
+# gets gamma^H * V(s_H) > 0. The difference between them is exactly the signal
+# this project is trying to distil. But the gate in landscape_summary and the
+# 0.02 threshold in the notebook's oracle verdict are written against
+# reward-coverage and will read FAIL here for a reason that is not a fault.
+#
+# CF_HORIZON IS PROVISIONAL. It is set from the RANDOM-policy branch measurement
+# above plus episode length (~55 steps trained), NOT from a sweep on a trained
+# checkpoint -- there is no trained LavaGap policy yet. Redo the sweep the way
+# it was done for Unlock once the baseline has run, and update this file:
+#
+#     H=16 covers ~29% of a 55-step episode; H=32 covers ~58%.
+#
+# COST. Branch budget = cf_horizon * cf_rollouts * cf_subsample = 16*2*0.10 =
+# 3.20, the same budget as unlock_cf and redbluedoors8x8_cf. Unlock measured
+# ~30 ms/state at H=16; this env's grid is smaller, so expect no worse.
+
+env:
+  env_id: MiniGrid-LavaGapS6-v0
+  n_envs: 16
+  max_episode_steps: null      # MiniGrid's own limit: 144
+  obs_norm: image
+  fully_observable: true       # the oracle needs an MDP; do not change
+  success_on: positive_reward  # dying in lava terminates -- 509 of 600 random
+                               # episodes. `terminated` would score those as wins.
+  layout_seeds: null
+  layout_seed_mode: cycle
+
+ppo:
+  total_timesteps: 500000
+  n_steps: 128
+  n_epochs: 4
+  n_minibatches: 8             # -> minibatch 256
+  learning_rate: 0.001
+  anneal_lr: false
+  optim_eps: 1.0e-8
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_coef: 0.2
+  clip_vloss: true
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: null
+
+  norm_adv: batch
+  norm_adv_min_std: 1.0e-06
+
+  pg_mode: cf_all_action       # the notebook overrides this per arm
+  cf_restore: fast             # verify section 3 checks this against 'exact'
+  cf_validate: true
+  # Control-variate framing, as in unlock_cf and redbluedoors8x8_cf: because
+  # sum_a pi_old(a|s) A_CF(s,a) = 0 exactly, the CF term is zero-mean under the
+  # behaviour policy and cannot bias the gradient at theta = theta_old, only its
+  # variance. So it is added on top of a full-strength PPO gradient rather than
+  # replacing half of one. alpha_gae + alpha_cf = 1.5 takes larger actor steps
+  # than the gae arm's 1.0 -- a step-size confound to watch via approx_kl.
+  alpha_gae: 1.0
+  alpha_cf: 0.5
+  cf_horizon: 16               # PROVISIONAL -- see the note above
+  cf_rollouts: 2               # common random numbers across actions
+  cf_subsample: 0.10           # 204 of 2048 states per rollout; budget 3.20
+  cf_bootstrap_tail: true
+  cf_branch_envs: 256
+
+  ent_mode: fixed
+  prob_floor_start: 0.0
+  prob_floor_end: 0.0
+
+  encoder: cnn
+  share_encoder: true
+  hidden_sizes: [64]
+  activation: tanh
+  separate_grad_clip: false
+  device: cpu
+
+run:
+  run_name: lavagap           # the notebook appends _gae / _cf / _shuf
+  seeds: [0, 1]
+  trajectory_stride: 4
+  compact_trajectory_dtypes: true
+  log_every_updates: 10
+  record_trajectories: true
+  eval_every_updates: 0
+  eval_episodes: 20
+  init_from: null
+
+reward:
+  # Must stay off: config._validate refuses shaping together with
+  # pg_mode=cf_all_action, because the oracle reads the RAW environment reward
+  # while the critic would have been trained on the shaped one.
+  potential_shaping: false
+  potential_key: 0.0
+  potential_door: 0.0
+  count_bonus_coef: 0.0
+
+oracle:
+  checkpoint_fraction: 0.75
+
+note: |
+  No sub-goals exist on this env. MiniGridProbe finds no key and no doors, falls
+  into "two_doors" mode with an empty door list, and observe() returns
+  (False, False) for the whole run -- verified, it does not raise. So
+  subgoal1_rate_100 and subgoal2_rate_100 are flat zero and the sub-goal ladder
+  is not a diagnostic here.
+
+  The replacement metric is the DEATH RATE, computed from episodes.csv with no
+  trainer change: a failed episode shorter than 144 steps died in lava; one of
+  exactly 144 timed out. Deaths should fall well before success rises, and that
+  gap is where a counterfactual signal ought to show up first -- avoiding an
+  irreversible mistake is precisely what A_CF can see one step ahead and GAE
+  cannot until the return arrives.

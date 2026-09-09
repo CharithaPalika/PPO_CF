@@ -1,0 +1,23 @@
+#!/bin/bash
+# Experiment 1: PPO vs PPO-CF across the requested environment set.
+#
+# Despite the historical filename, this submits seven environments:
+#   DoorKey 5x5, DoorKey 6x6, LavaGap, Unlock, UnlockPickup,
+#   RedBlueDoors 6x6, and Taxi.
+#
+#   ./experiment_1_6_envs       # 16 chunks, default
+#   ./experiment_1_6_envs 8     # 8 chunks
+#
+# Submits EXP1_DK5 and lets the analyse job chain through the remaining stages.
+# Nothing computes here; run this from the cluster login node.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+mkdir -p logs artifacts/{manifests,chunks,tables,figures,status} runs
+
+command -v sbatch >/dev/null || { echo "sbatch not found -- run this on the login node" >&2; exit 1; }
+
+source slurm/_submit_lib.sh
+
+parse_chunks "$@" || exit 1
+submit_stage "EXP1_DK5" "gae,cf" "$N_CHUNKS" "EXP1_TAXI"

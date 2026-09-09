@@ -1,0 +1,90 @@
+# MiniGrid-KeyCorridorS3R1-v0 -- plain PPO baseline.
+#
+# WEB CHECK (2026-09-09). RL Baselines3 Zoo has a specific PPO entry for this
+# env and the published SB3 Hugging Face checkpoint reports mean reward
+# 0.95 +/- 0.00. The tuned PPO values are:
+#   n_timesteps 500k, n_envs 8, n_steps 128, batch_size 64, n_epochs 10,
+#   gamma 0.99, gae_lambda 0.95, learning_rate 2.5e-4, clip_range 0.2,
+#   ent_coef 0.0, normalize true.
+#
+# WHY NOT COPY THE WRAPPER LITERALLY.
+#   zoo:  FlatObsWrapper + MlpPolicy over MiniGrid's egocentric observation
+#   here: FullyObsWrapper + image CNN, so the later PPO-CF oracle gets a Markov
+#         state and exact simulator restore remains meaningful.
+#
+# THE TASK. Find the matching key, unlock the target door, then pick up the
+# mission object. This is a compact version of the UnlockPickup failure mode:
+# pickup and toggle are mandatory, and success happens one leg after the door.
+
+env:
+  env_id: MiniGrid-KeyCorridorS3R1-v0
+  n_envs: 8
+  max_episode_steps: null      # MiniGrid's own limit: 30 * 3^2 = 270
+  obs_norm: image
+  fully_observable: true       # keep the task Markov for the later oracle work
+  success_on: terminated       # success is picking up the correct object
+  layout_seeds: null
+  layout_seed_mode: cycle
+
+ppo:
+  total_timesteps: 500000
+  n_steps: 128                 # 8 x 128 = 1024 per rollout, matching RL Zoo
+  n_epochs: 10
+  n_minibatches: 16            # -> minibatch 64, matching RL Zoo
+  learning_rate: 0.00025
+  anneal_lr: false
+  optim_eps: 1.0e-8
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_coef: 0.2
+  clip_vloss: true
+  ent_coef: 0.0
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: null
+
+  norm_adv: batch
+  norm_adv_min_std: 1.0e-06
+
+  pg_mode: gae
+  ent_mode: fixed
+  prob_floor_start: 0.0
+  prob_floor_end: 0.0
+
+  encoder: cnn
+  share_encoder: true
+  hidden_sizes: [64]
+  activation: tanh
+  separate_grad_clip: false
+  device: cpu
+
+run:
+  run_name: keycorridors3r1
+  seeds: [0]
+  trajectory_stride: 4
+  compact_trajectory_dtypes: true
+  log_every_updates: 10
+  record_trajectories: true
+  eval_every_updates: 0
+  eval_episodes: 20
+  init_from: null
+
+reward:
+  potential_shaping: false
+  potential_key: 0.0
+  potential_door: 0.0
+  count_bonus_coef: 0.0
+
+oracle:
+  checkpoint_fraction: 0.75
+
+note: |
+  Actions are 0 left, 1 right, 2 forward, 3 pickup, 4 drop, 5 toggle, 6 done.
+  The public PPO recipe uses no entropy bonus and no probability floor. If this
+  fully-observable CNN variant collapses `pickup` or `toggle`, try a fixed
+  layout with a small floor before concluding the environment is unsuitable:
+
+      "env.layout_seeds": [0]
+      "ppo.prob_floor_start": 0.15
+      "ppo.prob_floor_end": 0.02
+      "ppo.ent_coef": 0.03

@@ -355,8 +355,12 @@ class EnvPool:
                     # the only way to end an episode is to succeed; RedBlueDoors
                     # also terminates on the WRONG door order with reward 0, so
                     # it needs the positive-return test.
-                    "success": (bool(term and self.episode_return[i] > 0)
-                                if self.success_on == "positive_reward" else bool(term)),
+                    "success": (
+                        bool(term and self.episode_return[i] > 0)
+                        if self.success_on == "positive_reward"
+                        else bool(trunc) if self.success_on == "truncated"
+                        else bool(term)
+                    ),
                     # The two sub-goals between "did nothing" and "solved" --
                     # the only way to tell failure modes apart while success is
                     # pinned at zero. What they MEAN is environment-specific

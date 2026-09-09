@@ -1,0 +1,89 @@
+# PPO-CF experiment on MiniGrid-KeyCorridorS3R1-v0.
+#
+# ONE config drives ALL THREE arms. The notebook overrides only `ppo.pg_mode`
+# (gae / cf_all_action / cf_shuffled), so every other hyperparameter is
+# identical by construction and the only difference between runs is the policy
+# gradient.
+#
+# This starts from the public RL Zoo PPO recipe used in keycorridors3r1.yaml,
+# then adds PPO-CF fields. H=64 is the first conservative horizon because reward
+# is after the full chain: key -> locked door -> object pickup.
+
+env:
+  env_id: MiniGrid-KeyCorridorS3R1-v0
+  n_envs: 8
+  max_episode_steps: null      # MiniGrid's own limit: 270
+  obs_norm: image
+  fully_observable: true       # the oracle needs an MDP; do not change
+  success_on: terminated
+  layout_seeds: null
+  layout_seed_mode: cycle
+
+ppo:
+  total_timesteps: 500000
+  n_steps: 128
+  n_epochs: 10
+  n_minibatches: 16            # -> minibatch 64, matching RL Zoo
+  learning_rate: 0.00025
+  anneal_lr: false
+  optim_eps: 1.0e-8
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_coef: 0.2
+  clip_vloss: true
+  ent_coef: 0.0
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: null
+
+  norm_adv: batch
+  norm_adv_min_std: 1.0e-06
+
+  pg_mode: cf_all_action       # the notebook overrides this per arm
+  cf_restore: fast             # verify against exact before trusting a run
+  cf_validate: true
+  alpha_gae: 1.0
+  alpha_cf: 0.5
+  cf_horizon: 64
+  cf_rollouts: 2
+  cf_subsample: 0.05           # about 51 of 1024 rollout states per update
+  cf_bootstrap_tail: true
+  cf_branch_envs: 256
+
+  ent_mode: fixed
+  prob_floor_start: 0.0
+  prob_floor_end: 0.0
+
+  encoder: cnn
+  share_encoder: true
+  hidden_sizes: [64]
+  activation: tanh
+  separate_grad_clip: false
+  device: cpu
+
+run:
+  run_name: keycorridors3r1
+  seeds: [0]
+  trajectory_stride: 4
+  compact_trajectory_dtypes: true
+  log_every_updates: 10
+  record_trajectories: true
+  eval_every_updates: 0
+  eval_episodes: 20
+  init_from: null
+
+reward:
+  # Must stay off for PPO-CF: the oracle reads the raw environment reward.
+  potential_shaping: false
+  potential_key: 0.0
+  potential_door: 0.0
+  count_bonus_coef: 0.0
+
+oracle:
+  checkpoint_fraction: 0.75
+
+note: |
+  Watch `pickup` (3), `toggle` (5), and `drop` (4). The public PPO checkpoint
+  solves this env without a probability floor, but this repo's fully observable
+  CNN setup is not wrapper-identical to RL Zoo. If the baseline collapses those
+  actions, use the fixed-layout/floor overrides documented in keycorridors3r1.

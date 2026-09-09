@@ -111,4 +111,4 @@ python -m pipeline.smoke --steps 2 --pg_mode cf_all_action
 rm -rf runs/_smoke || true
 
 echo
-echo "verify OK -- safe to submit ./submit_e1.sh"
+echo "verify OK -- safe to submit ./experiment_1_6_envs"

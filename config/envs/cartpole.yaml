@@ -1,0 +1,78 @@
+# CartPole-v1 -- plain PPO baseline.
+#
+# This is the classic-control implementation self-test from experiment_plan.md:
+# PPO on CartPole-v1 reached roughly return 20 -> 462 in 150k steps. It is much
+# easier than MountainCar because reward is dense (+1 per alive step), so it is
+# a good quick check that the trainer, logging, checkpoints and notebooks work.
+#
+# IMPORTANT SUCCESS SEMANTICS. In CartPole, `terminated` means the pole fell or
+# the cart left bounds -- failure. Solving the episode is surviving to the
+# 500-step TimeLimit, which Gymnasium reports as `truncated`. That is why this
+# config uses `success_on: truncated`.
+#
+# CartPole's observation bounds contain infinities for velocity terms, so the
+# fixed affine scaler cannot be used. Running normalization is checkpointed with
+# the model and is therefore safe for the downstream oracle.
+
+env:
+  env_id: CartPole-v1
+  n_envs: 16
+  max_episode_steps: null      # registered CartPole-v1 limit: 500
+  obs_norm: running
+  success_on: truncated
+  layout_seeds: null
+
+ppo:
+  total_timesteps: 350000
+  n_steps: 128                 # 16 x 128 = 2048 per rollout
+  n_epochs: 4
+  n_minibatches: 8             # -> minibatch 256
+  learning_rate: 0.0003
+  anneal_lr: true
+  optim_eps: 1.0e-05
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_coef: 0.2
+  clip_vloss: true
+  ent_coef: 0.0
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: null
+
+  norm_adv: batch
+  norm_adv_min_std: 1.0e-06
+
+  pg_mode: gae
+  ent_mode: fixed
+  prob_floor_start: 0.0
+  prob_floor_end: 0.0
+
+  encoder: mlp
+  share_encoder: false
+  hidden_sizes: [64, 64]
+  activation: tanh
+  separate_grad_clip: true
+  device: cpu
+
+run:
+  run_name: cartpole
+  seeds: [0, 1, 2]
+  trajectory_stride: 1
+  compact_trajectory_dtypes: false
+  log_every_updates: 5
+  record_trajectories: true
+  eval_every_updates: 0
+  eval_episodes: 20
+  init_from: null
+
+reward:
+  potential_shaping: false
+  count_bonus_coef: 0.0
+
+oracle:
+  checkpoint_fraction: 0.75
+
+note: |
+  Actions are 0 push left and 1 push right. Return is episode length capped at
+  500. Read success_rate_100 as "fraction of the last 100 episodes that reached
+  the 500-step time limit", not as "environment terminated".

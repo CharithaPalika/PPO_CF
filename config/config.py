@@ -97,6 +97,8 @@ class EnvConfig:
     #   "terminated"      -> any MDP termination (MountainCar reaches the goal,
     #                        Taxi drops off correctly, DoorKey reaches the goal).
     #   "positive_reward" -> termination AND a positive episode return.
+    #   "truncated"       -> TimeLimit cutoff, for survival tasks such as
+    #                        CartPole-v1 where termination is failure.
     # RedBlueDoors needs the second: opening the blue door BEFORE the red one
     # also terminates, with reward 0, so `terminated` alone would log a failure
     # as a success. MountainCar cannot use it -- its goal reward is -1.
@@ -542,9 +544,9 @@ def _validate(cfg: ExperimentConfig) -> None:
         )
     if cfg.ppo.ent_mode not in ("fixed", "adaptive"):
         raise ValueError(f"ent_mode must be fixed|adaptive, got {cfg.ppo.ent_mode!r}")
-    if cfg.env.success_on not in ("terminated", "positive_reward"):
+    if cfg.env.success_on not in ("terminated", "positive_reward", "truncated"):
         raise ValueError(
-            f"success_on must be terminated|positive_reward, got {cfg.env.success_on!r}")
+            f"success_on must be terminated|positive_reward|truncated, got {cfg.env.success_on!r}")
     if cfg.env.layout_seed_mode not in ("cycle", "random"):
         raise ValueError(f"layout_seed_mode must be cycle|random, got {cfg.env.layout_seed_mode!r}")
     if cfg.ppo.encoder == "cnn" and cfg.env.obs_norm != "image":

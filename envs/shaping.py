@@ -75,13 +75,18 @@ class MiniGridProbe:
                 if cell is None:
                     continue
                 if cell.type == "door":
-                    doors.append(((i, j), cell.color))
+                    doors.append(((i, j), cell.color, bool(getattr(cell, "is_locked", False))))
                 elif cell.type == "key":
                     has_key = True
         # deterministic order: red before blue, else grid order
         order = {"red": 0, "blue": 1}
-        doors.sort(key=lambda d: order.get(d[1], 2 + d[0][0]))
-        return doors, has_key
+        if has_key:
+            # Key/door tasks such as KeyCorridor can contain ordinary hallway
+            # doors before the locked target door. Track the locked door first.
+            doors.sort(key=lambda d: (not d[2], d[0][0], d[0][1]))
+        else:
+            doors.sort(key=lambda d: order.get(d[1], 2 + d[0][0]))
+        return [(pos, color) for pos, color, _locked in doors], has_key
 
     @property
     def door_pos(self):

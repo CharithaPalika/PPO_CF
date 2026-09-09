@@ -9,9 +9,8 @@
 # and termination when the correct box is picked up or the episode times out.
 # This repo's uniform-random probe found 0/250 successes, so unlike Unlock this
 # is not expected to solve from incidental reward alone. rl-baselines3-zoo does
-# not currently list a tuned row for UnlockPickup, so this config starts from
-# the closest validated recipe: the zoo MiniGrid PPO defaults and the repo's
-# existing Unlock/DoorKey CNN baseline.
+# not currently list a tuned row for UnlockPickup, so this config now uses the
+# fixed-layout/action-floor recipe that learned in the notebook.
 #
 # WHY NOT COPY RL-ZOO LITERALLY.
 #   zoo: FlatObsWrapper + MlpPolicy  -> partial 7x7 egocentric observation
@@ -29,11 +28,11 @@ env:
   obs_norm: image
   fully_observable: true       # keep the task Markov for the later oracle work
   success_on: terminated       # success is picking up the correct box
-  layout_seeds: null
+  layout_seeds: [0]
   layout_seed_mode: cycle
 
 ppo:
-  total_timesteps: 1000000     # harder than Unlock; enough headroom for baseline PPO
+  total_timesteps: 1500000     # fixed-layout/action-floor run that learns
   n_steps: 128                 # 16 x 128 = 2048 per rollout
   n_epochs: 4                  # zoo: 10
   n_minibatches: 8             # -> minibatch 256
@@ -44,7 +43,7 @@ ppo:
   gae_lambda: 0.95
   clip_coef: 0.2
   clip_vloss: true
-  ent_coef: 0.01               # zoo: 0.0
+  ent_coef: 0.1                # stronger fixed-layout recipe
   vf_coef: 0.5
   max_grad_norm: 0.5
   target_kl: null
@@ -54,8 +53,8 @@ ppo:
 
   pg_mode: gae
   ent_mode: fixed
-  prob_floor_start: 0.0
-  prob_floor_end: 0.0
+  prob_floor_start: 0.20
+  prob_floor_end: 0.05
 
   encoder: cnn
   share_encoder: true
@@ -65,8 +64,8 @@ ppo:
   device: cpu
 
 run:
-  run_name: unlockpickup
-  seeds: [0, 1]
+  run_name: unlockpickup_fixed0_floor_stronger
+  seeds: [0]
   trajectory_stride: 4
   compact_trajectory_dtypes: true
   log_every_updates: 10

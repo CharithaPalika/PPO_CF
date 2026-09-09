@@ -1,0 +1,86 @@
+# PPO-CF experiment on CartPole-v1.
+#
+# ONE config drives ALL THREE arms. The notebook overrides only `ppo.pg_mode`
+# (gae / cf_all_action / cf_shuffled), so every other hyperparameter is
+# identical by construction and the only difference between runs is the policy
+# gradient.
+#
+# CartPole is dense-reward and easy for plain PPO, so this is a sanity check for
+# the PPO-CF training path rather than a strong scientific benchmark. If CF wins
+# here, check KL/clipfrac before attributing the win to counterfactual credit;
+# if all arms overlap, that is expected on a solved dense-reward task.
+#
+# IMPORTANT SUCCESS SEMANTICS. In CartPole, `terminated` is failure and
+# `truncated` at the 500-step TimeLimit is success.
+
+env:
+  env_id: CartPole-v1
+  n_envs: 16
+  max_episode_steps: null
+  obs_norm: running
+  success_on: truncated
+  layout_seeds: null
+
+ppo:
+  total_timesteps: 350000
+  n_steps: 128
+  n_epochs: 4
+  n_minibatches: 8
+  learning_rate: 0.0003
+  anneal_lr: true
+  optim_eps: 1.0e-05
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_coef: 0.2
+  clip_vloss: true
+  ent_coef: 0.0
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: null
+
+  norm_adv: batch
+  norm_adv_min_std: 1.0e-06
+
+  pg_mode: cf_all_action       # the notebook overrides this per arm
+  cf_restore: exact            # fast restore is MiniGrid-only
+  cf_validate: true
+  alpha_gae: 1.0
+  alpha_cf: 0.5
+  cf_horizon: 32
+  cf_rollouts: 2
+  cf_subsample: 0.10           # about 205 of 2048 rollout states per update
+  cf_bootstrap_tail: true
+  cf_branch_envs: 256
+
+  ent_mode: fixed
+  prob_floor_start: 0.0
+  prob_floor_end: 0.0
+
+  encoder: mlp
+  share_encoder: false
+  hidden_sizes: [64, 64]
+  activation: tanh
+  separate_grad_clip: true
+  device: cpu
+
+run:
+  run_name: cartpole
+  seeds: [0, 1, 2]
+  trajectory_stride: 1
+  compact_trajectory_dtypes: false
+  log_every_updates: 5
+  record_trajectories: true
+  eval_every_updates: 0
+  eval_episodes: 20
+  init_from: null
+
+reward:
+  potential_shaping: false
+  count_bonus_coef: 0.0
+
+oracle:
+  checkpoint_fraction: 0.75
+
+note: |
+  Actions are 0 push left and 1 push right. Reward is +1 every alive step, so
+  Q_g reward coverage should be high even early in training.

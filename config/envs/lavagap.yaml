@@ -1,0 +1,144 @@
+# MiniGrid-LavaGapS6-v0 -- plain PPO baseline.
+#
+# THE TASK. Cross a room split by a wall of lava with a single gap in it, and
+# reach the goal square. Stepping into lava ENDS THE EPISODE with reward 0.
+#
+# WHY THIS ENV, FOR THIS PROJECT. Every environment tried so far has the same
+# problem: reward is purely terminal and far away, so a counterfactual branch of
+# any affordable length sees nothing and A_CF degenerates to a critic
+# difference. LavaGap is the opposite -- from most states at least one action is
+# immediately, irreversibly wrong. Measured with 16-step branches under a random
+# policy: 23.5% reach a terminal, against 2.0% on RedBlueDoors-8x8 and 0.0% on
+# DoorKey-6x6. That is a structural property of the task, not something bought
+# by tuning cf_horizon.
+#
+# MEASURED (2026-09-09, this repo's env_pool, 600 random episodes):
+#
+#   grid                 6 x 6 (square)
+#   obs fully-observable (6, 6, 3) = 108        sim_state 114
+#   actions              7           max_steps  144
+#   reached the goal                  23 / 600  -> random success 0.038
+#   DIED IN LAVA (terminated, r = 0) 509 / 600  <- 85% of episodes!
+#   truncated                         68 / 600
+#   mean episode length               55 steps
+#   restore/replay under set_sim_state   exact over 60 transitions
+#
+# THE ONE SETTING THAT MUST NOT BE WRONG
+#
+#   `success_on: positive_reward`. Dying in lava terminates, so the default
+#   `terminated` rule would score 509 of 600 random episodes as SUCCESSES. This
+#   is the RedBlueDoors trap again and far more severe -- there, the wrong door
+#   order was ~50% of terminations; here failure is 85% of them.
+#
+# TWO CONSEQUENCES OF HAVING NO SUB-GOALS
+#
+# 1. The MiniGridProbe finds no key and no doors, so it falls into "two_doors"
+#    mode with an empty door list and `observe()` returns (False, False)
+#    forever. It does NOT raise -- verified -- but `subgoal1_rate_100` and
+#    `subgoal2_rate_100` will be flat zero and carry no information. The
+#    sub-goal ladder plot is not a useful diagnostic on this env.
+#
+# 2. The metric that replaces it is the DEATH RATE, and it is derivable from
+#    episodes.csv without touching the trainer:
+#        died  = (success == False) & (length < 144)
+#        timed out = (success == False) & (length == 144)
+#    A policy that has learned to fear lava shows deaths falling long before
+#    success rises. The notebook computes this.
+#
+# HYPERPARAMETERS. rl-baselines3-zoo has NO entry for any LavaGap, LavaCrossing,
+# DistShift or SimpleCrossing environment -- only 12 MiniGrid envs appear in
+# ppo.yml and none of them are this family. So there is no published per-env
+# recipe to copy. Two things are used instead:
+#
+#   * the zoo's generic MiniGrid block, which would apply by extension:
+#     n_envs 8, 1e5 steps, n_steps 128, batch 64, n_epochs 10, gamma 0.99,
+#     gae_lambda 0.95, ent_coef 0.0, lr 2.5e-4, clip 0.2 -- but with
+#     MlpPolicy + FlatObsWrapper + normalize: true, none of which transfer
+#     (FlatObs is the 7x7 EGOCENTRIC view, a POMDP, and A_CF needs an MDP; a
+#     running obs normaliser is not the stateless state->input map the oracle
+#     requires);
+#   * this repo's own recipe, which solved DoorKey-5x5, DoorKey-6x6,
+#     RedBlueDoors-6x6 and Unlock. That is what is set below, with the zoo's
+#     differing values noted inline.
+#
+# Where the two already agree: n_steps 128, gamma 0.99, gae_lambda 0.95,
+# clip 0.2.
+
+env:
+  env_id: MiniGrid-LavaGapS6-v0    # S5 (100 steps) and S7 (196) are drop-in
+  n_envs: 16                       # zoo: 8
+  max_episode_steps: null          # MiniGrid's own limit: 144
+  obs_norm: image
+  fully_observable: true           # the oracle needs an MDP; do not change
+  success_on: positive_reward      # <- NOT NEGOTIABLE. See above.
+  layout_seeds: null
+  layout_seed_mode: cycle
+
+ppo:
+  total_timesteps: 500000      # same budget as Unlock so the two are comparable.
+                               # Expect it far sooner: episodes average 55 steps,
+                               # so a 2048-frame rollout holds ~37 of them and
+                               # ~1.4 random successes, against ~0.29 on Unlock.
+  n_steps: 128                 # zoo's value too; 16 x 128 = 2048 >> one episode
+  n_epochs: 4                  # zoo: 10
+  n_minibatches: 8             # -> minibatch 256
+  learning_rate: 0.001         # zoo: 2.5e-4
+  anneal_lr: false
+  optim_eps: 1.0e-8
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_coef: 0.2
+  clip_vloss: true
+  ent_coef: 0.01               # zoo: 0.0. Keep some exploration pressure: an
+                               # agent that learns "never move" collects a
+                               # reliable 0 and lava makes that tempting.
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: null
+
+  norm_adv: batch
+  norm_adv_min_std: 1.0e-06
+
+  pg_mode: gae
+  ent_mode: fixed
+  prob_floor_start: 0.0
+  prob_floor_end: 0.0
+
+  encoder: cnn
+  share_encoder: true
+  hidden_sizes: [64]
+  activation: tanh
+  separate_grad_clip: false
+  device: cpu
+
+run:
+  run_name: lavagap
+  seeds: [0, 1]
+  trajectory_stride: 4
+  compact_trajectory_dtypes: true
+  log_every_updates: 10
+  record_trajectories: true
+  eval_every_updates: 0
+  eval_episodes: 20
+  init_from: null              # nothing below this env to warm-start from
+
+reward:
+  # Off. Note that potential shaping here would have to be over distance to the
+  # gap, not over key/door -- MiniGridProbe has no sub-goals to shape.
+  potential_shaping: false
+  potential_key: 0.0
+  potential_door: 0.0
+  count_bonus_coef: 0.0
+
+oracle:
+  checkpoint_fraction: 0.75
+
+note: |
+  7 actions, but only three matter: left (0), right (1), forward (2). There is
+  nothing to pick up, drop, toggle or declare done, so `pickup` (3), `drop` (4),
+  `toggle` (5) and `done` (6) are all inert -- a correct oracle should rank them
+  below average nearly everywhere, which landscape_summary checks.
+
+  Reward on success is 1 - 0.9*(steps/144). Lava and time-out both pay 0, so the
+  return alone cannot tell a death from a wander; use episode LENGTH to separate
+  them (a death is short, a time-out is exactly 144).

@@ -211,7 +211,7 @@ def _figure(stage: str, df) -> None:
 
     ax.set_xlabel("environment frames")
     ax.set_ylabel("success rate (100-episode rolling mean)")
-    ax.set_title(f"{stage}: PPO vs PPO-CF vs action-permuted CF")
+    ax.set_title(f"{stage}: PPO vs PPO-CF")
     ax.set_ylim(-0.02, 1.02)
     ax.legend()
     ax.grid(alpha=0.3)

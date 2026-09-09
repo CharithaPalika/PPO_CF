@@ -30,7 +30,7 @@ ppo:
   gae_lambda: 0.98
   clip_coef: 0.2
   clip_vloss: true
-  ent_coef: 0.003
+  ent_coef: 0.1 #0.003
   vf_coef: 0.5
   max_grad_norm: 0.5
   target_kl: null

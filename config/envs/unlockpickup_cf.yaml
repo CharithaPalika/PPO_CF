@@ -1,0 +1,103 @@
+# PPO-CF experiment on MiniGrid-UnlockPickup-v0.
+#
+# ONE config drives ALL THREE arms. The notebook overrides only `ppo.pg_mode`
+# (gae / cf_all_action / cf_shuffled), so every other hyperparameter is
+# identical by construction and the only difference between runs is the policy
+# gradient.
+#
+# WHY THIS CONFIG STARTS FROM THE FIXED-LAYOUT BASELINE.
+# The random-layout baseline found the key often but almost never opened the
+# door or picked up the target box. The fixed-layout run with a probability
+# floor and ent_coef=0.1 learns. The current controlled comparison uses the
+# stronger successful recipe: fixed layout seed 0, 1.5M frames, and a probability
+# floor annealed from 0.20 to 0.05.
+#
+# WHY H=64. Unlock's CF config uses H=32 because opening the door is terminal.
+# UnlockPickup's reward is one leg later: open the door, navigate to the box,
+# free the carrying slot if needed, then pick up the box. H=64 is a conservative
+# first value so `cf_reward_coverage` has a chance to see actual reward. If the
+# oracle check reports high coverage at H=64, try H=32 as the cheaper follow-up.
+
+env:
+  env_id: MiniGrid-UnlockPickup-v0
+  n_envs: 16
+  max_episode_steps: null      # MiniGrid's own limit: 288
+  obs_norm: image
+  fully_observable: true       # the oracle needs an MDP; do not change
+  success_on: terminated       # success is picking up the correct box
+  layout_seeds: [0]
+  layout_seed_mode: cycle
+
+ppo:
+  total_timesteps: 1500000
+  n_steps: 128
+  n_epochs: 4
+  n_minibatches: 8             # -> minibatch 256
+  learning_rate: 0.001
+  anneal_lr: false
+  optim_eps: 1.0e-8
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_coef: 0.2
+  clip_vloss: true
+  ent_coef: 0.1                # from the fixed-layout baseline that learns
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: null
+
+  norm_adv: batch
+  norm_adv_min_std: 1.0e-06
+
+  pg_mode: cf_all_action       # the notebook overrides this per arm
+  cf_restore: fast             # verify against exact before trusting a run
+  cf_validate: true
+  alpha_gae: 1.0
+  alpha_cf: 0.5
+  cf_horizon: 64
+  cf_rollouts: 2
+  cf_subsample: 0.05           # 102 of 2048 states per rollout; budget 6.4
+  cf_bootstrap_tail: true
+  cf_branch_envs: 256
+
+  ent_mode: fixed
+  prob_floor_start: 0.20
+  prob_floor_end: 0.05
+
+  encoder: cnn
+  share_encoder: true
+  hidden_sizes: [64]
+  activation: tanh
+  separate_grad_clip: false
+  device: cpu
+
+run:
+  run_name: unlockpickup_fixed0_floor_stronger
+  seeds: [0]
+  trajectory_stride: 4
+  compact_trajectory_dtypes: true
+  log_every_updates: 10
+  record_trajectories: true
+  eval_every_updates: 0
+  eval_episodes: 20
+  init_from: null
+
+reward:
+  # Must stay off: config._validate refuses shaping together with
+  # pg_mode=cf_all_action, because the oracle reads the RAW environment reward
+  # while the critic would have been trained on the shaped one.
+  potential_shaping: false
+  potential_key: 0.0
+  potential_door: 0.0
+  count_bonus_coef: 0.0
+
+oracle:
+  checkpoint_fraction: 0.75
+
+note: |
+  7 actions. `pickup` (3), `drop` (4), and `toggle` (5) are the actions to
+  watch. Upstream docs label drop unused, but Door.toggle does not consume the
+  key and MiniGrid only picks up the target box when `carrying is None`.
+
+  The probe exposes two latched sub-goals in key_door mode:
+  subgoal1 = carrying the key, subgoal2 = door open. Success is later than
+  subgoal2 on this env because the target box still has to be picked up.

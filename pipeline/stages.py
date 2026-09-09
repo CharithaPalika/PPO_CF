@@ -56,6 +56,12 @@ ARM_PG_MODE = {
 }
 GROUPS_ALL = ["gae", "cf", "shuf"]
 
+ALGO_TAG = {
+    "gae": "ppo",
+    "cf": "ppo-cf",
+    "shuf": "ppo-cf-shuffled",
+}
+
 #: Trajectory datasets are 25 MB/seed and feed NB03+ (E2/E3 distillation), not
 #: E1. Off here takes a seed from ~25 MB to ~4 MB -- 30 runs, ~110 MB instead
 #: of ~1.5 GB. Set PPO_CF_RECORD_TRAJECTORIES=1 to turn them back on.
@@ -68,9 +74,11 @@ RECORD_TRAJECTORIES = os.environ.get("PPO_CF_RECORD_TRAJECTORIES", "0") == "1"
 #: the live log and the wandb curves usable.
 LOG_EVERY_UPDATES = 2
 
-#: Both stages: 5 paired seeds, 2M frames. Matched on purpose, so the only thing
-#: that differs between E1_RBD6 and E1_RBD8 is the environment.
+#: Default paired seeds for cluster sweeps.
 SEEDS = list(range(5))
+
+#: Frame override used only by the historical RedBlue E1 stages below. The new
+#: EXP1_* stages use their YAML budgets as the source of truth.
 FRAMES = 2_000_000
 
 STAGES: dict[str, dict] = {
@@ -113,12 +121,74 @@ STAGES: dict[str, dict] = {
         "seeds": [0, 2],
         "overrides": {},
     },
+
+    # ---- Experiment 1: seven environments, PPO vs PPO-CF -----------------
+    #
+    # Submitted by ./experiment_1_6_envs. Despite the historical filename, this
+    # sweep has seven environments: DoorKey 5x5, DoorKey 6x6, LavaGap, Unlock,
+    # UnlockPickup, RedBlueDoors 6x6, and Taxi.
+    #
+    # Each stage uses the *_cf YAML as the single source of truth. The array
+    # overrides only ppo.pg_mode per group, plus seed/run-name/logging fields,
+    # so the PPO and PPO-CF arms differ only in the policy gradient.
+    "EXP1_DK5": {
+        "env_config": "doorkey5x5_cf",
+        "env_tag": "doorkey5x5",
+        "seeds": SEEDS,
+        "overrides": {},
+    },
+    "EXP1_DK6": {
+        "env_config": "doorkey6x6_cf",
+        "env_tag": "doorkey6x6",
+        "seeds": SEEDS,
+        "overrides": {},
+    },
+    "EXP1_LAVAGAP": {
+        "env_config": "lavagap_cf",
+        "env_tag": "lavagap",
+        "seeds": SEEDS,
+        "overrides": {},
+    },
+    "EXP1_UNLOCK": {
+        "env_config": "unlock_cf",
+        "env_tag": "unlock",
+        "seeds": SEEDS,
+        "overrides": {},
+    },
+    "EXP1_UNLOCKPICKUP": {
+        "env_config": "unlockpickup_cf",
+        "env_tag": "unlockpickup",
+        "seeds": SEEDS,
+        "overrides": {},
+    },
+    "EXP1_RBD6": {
+        "env_config": "redbluedoors6x6_cf",
+        "env_tag": "redbluedoors6x6",
+        "seeds": SEEDS,
+        "overrides": {},
+    },
+    "EXP1_TAXI": {
+        "env_config": "taxi_cf",
+        "env_tag": "taxi",
+        "seeds": SEEDS,
+        "overrides": {},
+    },
 }
 
 #: E1_RBD6 finishes -> E1_RBD8 is submitted automatically. `PART_END` in the
 #: submit script is what stops the chain.
-CHAIN_NEXT = {"E1_RBD6": "E1_RBD8", "E1_RBD8": None,
-              "E0_reddoorbluedoor_test": None}   # stands alone, chains nowhere
+CHAIN_NEXT = {
+    "E1_RBD6": "E1_RBD8",
+    "E1_RBD8": None,
+    "E0_reddoorbluedoor_test": None,
+    "EXP1_DK5": "EXP1_DK6",
+    "EXP1_DK6": "EXP1_LAVAGAP",
+    "EXP1_LAVAGAP": "EXP1_UNLOCK",
+    "EXP1_UNLOCK": "EXP1_UNLOCKPICKUP",
+    "EXP1_UNLOCKPICKUP": "EXP1_RBD6",
+    "EXP1_RBD6": "EXP1_TAXI",
+    "EXP1_TAXI": None,
+}
 
 #: Stages with no parallel work at all (none in E1).
 ANALYSIS_ONLY: set[str] = set()
@@ -157,6 +227,11 @@ def run_name(stage: str, group: str) -> str:
     """runs/<run_name>/seed_<seed>/ -- e.g. runs/e1_rbd6_cf/seed_3/."""
     prefix = "_smoke/" if SMOKE_FRAMES else ""
     return f"{prefix}{stage.lower()}_{group}"
+
+
+def env_tag(stage: str) -> str:
+    spec = STAGES[stage]
+    return str(spec.get("env_tag") or spec["env_config"].replace("_cf", ""))
 
 
 def run_list(stage: str, groups: list[str]) -> list[dict]:
@@ -220,9 +295,10 @@ def execute(task: dict) -> dict:
     # comparison. utils/wandb_sink.py defaults it to offline; nothing here can
     # fail the run.
     os.environ.setdefault("PPO_CF_WANDB_PROJECT", "ppo-cf")
+    algo_tag = ALGO_TAG.get(group, group)
     os.environ["PPO_CF_WANDB_GROUP"] = stage
-    os.environ["PPO_CF_WANDB_JOB_TYPE"] = group
-    os.environ["PPO_CF_WANDB_TAGS"] = f"{stage},{group},{cfg.env.env_id}"
+    os.environ["PPO_CF_WANDB_JOB_TYPE"] = algo_tag
+    os.environ["PPO_CF_WANDB_TAGS"] = f"{env_tag(stage)},{algo_tag}"
 
     print(cfg.summary(), flush=True)
     t0 = time.time()
@@ -233,6 +309,8 @@ def execute(task: dict) -> dict:
     row = {
         "stage": stage,
         "group": group,
+        "env_tag": env_tag(stage),
+        "algo_tag": algo_tag,
         "seed": seed,
         "run_name": cfg.run.run_name,
         "env_id": cfg.env.env_id,

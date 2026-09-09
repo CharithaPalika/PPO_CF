@@ -1,0 +1,98 @@
+# MiniGrid-UnlockPickup-v0 -- plain PPO baseline.
+#
+# THE TASK. Pick up the key, unlock the door, then pick up the target box in
+# the locked room. This is the fourth task in the experiment plan's E1 ladder:
+# DoorKey-6x6 -> Unlock -> RedBlueDoors-6x6 -> UnlockPickup.
+#
+# WEB CHECK (2026-09-09). Farama documents this env as solvable without
+# language, with 7 actions, success reward 1 - 0.9 * step_count / max_steps,
+# and termination when the correct box is picked up or the episode times out.
+# This repo's uniform-random probe found 0/250 successes, so unlike Unlock this
+# is not expected to solve from incidental reward alone. rl-baselines3-zoo does
+# not currently list a tuned row for UnlockPickup, so this config starts from
+# the closest validated recipe: the zoo MiniGrid PPO defaults and the repo's
+# existing Unlock/DoorKey CNN baseline.
+#
+# WHY NOT COPY RL-ZOO LITERALLY.
+#   zoo: FlatObsWrapper + MlpPolicy  -> partial 7x7 egocentric observation
+#   here: FullyObsWrapper + image CNN -> Markov state, required by PPO-CF later
+#
+# The shared PPO values agree where they should: n_steps 128, gamma 0.99,
+# gae_lambda 0.95, clip 0.2. The repo's CNN MiniGrid baselines use a larger
+# learning rate and nonzero entropy because sparse pickup/toggle actions can
+# collapse before reward appears.
+
+env:
+  env_id: MiniGrid-UnlockPickup-v0
+  n_envs: 16
+  max_episode_steps: null      # MiniGrid's own limit: 288
+  obs_norm: image
+  fully_observable: true       # keep the task Markov for the later oracle work
+  success_on: terminated       # success is picking up the correct box
+  layout_seeds: null
+  layout_seed_mode: cycle
+
+ppo:
+  total_timesteps: 1000000     # harder than Unlock; enough headroom for baseline PPO
+  n_steps: 128                 # 16 x 128 = 2048 per rollout
+  n_epochs: 4                  # zoo: 10
+  n_minibatches: 8             # -> minibatch 256
+  learning_rate: 0.001         # zoo: 2.5e-4
+  anneal_lr: false
+  optim_eps: 1.0e-8
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_coef: 0.2
+  clip_vloss: true
+  ent_coef: 0.01               # zoo: 0.0
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: null
+
+  norm_adv: batch
+  norm_adv_min_std: 1.0e-06
+
+  pg_mode: gae
+  ent_mode: fixed
+  prob_floor_start: 0.0
+  prob_floor_end: 0.0
+
+  encoder: cnn
+  share_encoder: true
+  hidden_sizes: [64]
+  activation: tanh
+  separate_grad_clip: false
+  device: cpu
+
+run:
+  run_name: unlockpickup
+  seeds: [0, 1]
+  trajectory_stride: 4
+  compact_trajectory_dtypes: true
+  log_every_updates: 10
+  record_trajectories: true
+  eval_every_updates: 0
+  eval_episodes: 20
+  init_from: null
+
+reward:
+  potential_shaping: false
+  potential_key: 0.0
+  potential_door: 0.0
+  count_bonus_coef: 0.0
+
+oracle:
+  checkpoint_fraction: 0.75
+
+note: |
+  7 actions. `pickup` (3) is needed twice in the behavior sequence: once for
+  the key and once for the target box. `toggle` (5) opens the locked door, and
+  `drop` (4) may be needed to free the carrying slot after the key has served
+  its purpose. Upstream docs label drop unused, but MiniGrid's generic pickup
+  logic requires `carrying is None`.
+
+  The current MiniGrid probe exposes two latched sub-goals in key_door mode:
+  subgoal1 = carrying the key, subgoal2 = door open. Success is later than
+  subgoal2 on this env because the agent still has to reach and pick up the box.
+  That makes the ladder especially useful: key flat, door flat, and solved flat
+  point to three different failure modes.

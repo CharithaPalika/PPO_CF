@@ -1,0 +1,137 @@
+# MiniGrid-Unlock-v0 -- plain PPO baseline.
+#
+# THE TASK. Pick up the key, unlock the door. That is the whole episode: opening
+# the door IS success, there is no goal square to walk to afterwards. Which is
+# exactly why it is worth running -- DoorKey's sub-goal ladder showed
+# P(solve | door open) ~ 1.00 and P(door | key) 0.65-0.87, so on DoorKey the
+# only lossy leg is key -> door. Unlock is that leg with nothing else attached.
+#
+# It is also task 2 of the four in the experiment plan's E1 ladder
+# (DoorKey-6x6, Unlock, RedBlueDoors-6x6, UnlockPickup).
+#
+# MEASURED ON THIS ENVIRONMENT (2026-09-09, this repo's env_pool):
+#
+#   grid                 11 x 6  (NOT square)
+#   obs fully-observable (11, 6, 3) = 198
+#   actions              7   (log 7 = 1.946 nats)
+#   max_steps            288
+#   uniform-random success        0.040   (250 episodes)
+#   terminations with reward <= 0 0 of 400 random episodes
+#   restore/replay under set_sim_state   exact over 30 transitions
+#
+# The random-success number is the one that matters for "will PPO solve this".
+# On this codebase: RedBlueDoors-6x6 0.104 -> solved <1M; DoorKey-5x5 0.072 ->
+# solved ~120k; DoorKey-8x8 0.021 -> NOT solved at 3M. Unlock at 0.040 sits
+# above the line, and rl-baselines3-zoo solves it in 1e5 steps.
+#
+# THREE ENV-SPECIFIC NOTES
+#
+# 1. `success_on: terminated` is safe here, unlike RedBlueDoors. Measured: zero
+#    of 400 random episodes terminated with reward <= 0, i.e. the ONLY way this
+#    env terminates is by succeeding. (`positive_reward` would be equivalent.)
+#
+# 2. The grid is 11x6, not square, so the packed sim_state cannot tell the
+#    visitation plot its shape -- pass grid_shape=(11, 6). Same handling as
+#    RedBlueDoors.
+#
+# 3. The sub-goal probe picks its mode by whether the grid contains a key.
+#    Unlock has one, so it runs in "key_door" mode:
+#        subgoal1 = carrying the key
+#        subgoal2 = door open
+#    and on THIS env subgoal2 and success are the same event. Expect those two
+#    curves to sit on top of each other; the gap that carries information is
+#    subgoal1 -> subgoal2.
+#
+# HYPERPARAMETERS. This is the recipe that solved DoorKey-5x5, DoorKey-6x6 and
+# RedBlueDoors-6x6 in this repo, not rl-baselines3-zoo's entry, because the zoo
+# entry is not transferable in the two places that matter:
+#
+#   zoo: MlpPolicy + FlatObsWrapper  -> the 7x7 EGOCENTRIC view, a POMDP.
+#        A_CF = r + gamma*V(s') - V(s) is only defined in an MDP, so every
+#        config in this project is fully observable with the image encoder.
+#   zoo: normalize: true             -> VecNormalize running obs statistics.
+#        The oracle needs ONE unambiguous, stateless state -> network-input map;
+#        a running normaliser is neither.
+#
+# Where the two agree they already agree: n_steps 128, gamma 0.99,
+# gae_lambda 0.95, clip 0.2. Where they differ, the zoo values are noted inline
+# so a sweep has somewhere to start.
+
+env:
+  env_id: MiniGrid-Unlock-v0
+  n_envs: 16                   # zoo: 8
+  max_episode_steps: null      # MiniGrid's own limit: 288
+  obs_norm: image
+  fully_observable: true       # the oracle needs an MDP; do not change
+  success_on: terminated       # safe here -- see note 1 above
+  layout_seeds: null
+  layout_seed_mode: cycle
+
+ppo:
+  total_timesteps: 500000      # zoo solves it in 1e5; 5x that is headroom, and
+                               # the checkpoints show where it actually solved
+  n_steps: 128                 # zoo's value too. 16 x 128 = 2048 per rollout,
+                               # and episodes are <= 288 steps, so a rollout
+                               # spans several whole episodes -- no truncated
+                               # credit chain of the kind that broke DoorKey-8x8
+  n_epochs: 4                  # zoo: 10
+  n_minibatches: 8             # -> minibatch 256
+  learning_rate: 0.001         # zoo: 2.5e-4
+  anneal_lr: false
+  optim_eps: 1.0e-8
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_coef: 0.2
+  clip_vloss: true
+  ent_coef: 0.01               # zoo: 0.0
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: null
+
+  norm_adv: batch
+  norm_adv_min_std: 1.0e-06
+
+  pg_mode: gae
+  ent_mode: fixed
+  prob_floor_start: 0.0
+  prob_floor_end: 0.0
+
+  encoder: cnn
+  share_encoder: true
+  hidden_sizes: [64]
+  activation: tanh
+  separate_grad_clip: false
+  device: cpu
+
+run:
+  run_name: unlock
+  seeds: [0, 1]
+  trajectory_stride: 4
+  compact_trajectory_dtypes: true
+  log_every_updates: 10
+  record_trajectories: true
+  eval_every_updates: 0
+  eval_episodes: 20
+  init_from: null              # nothing below this env to warm-start from
+
+reward:
+  # Off. If you ever turn potential shaping on here the two weights mean
+  # "carrying the key" and "door open" -- and note that `door open` is the
+  # terminal event, so potential_door is shaping the goal itself.
+  potential_shaping: false
+  potential_key: 0.0
+  potential_door: 0.0
+  count_bonus_coef: 0.0
+
+oracle:
+  checkpoint_fraction: 0.75
+
+note: |
+  7 actions. `toggle` (5) is the only action that can open the door and
+  `pickup` (3) is the only one that can lift the key, so both must stay alive
+  in the per-action panel -- they are the two rungs of the task. `drop` (4) and
+  `done` (6) are useless here.
+
+  Reward on success is 1 - 0.9*(steps/288), so a fast solve scores near 1.0 and
+  a slow one near 0.1. Watch `mean_length_100` as well as success: the policy
+  can be solving every episode and still be leaving most of the return behind.

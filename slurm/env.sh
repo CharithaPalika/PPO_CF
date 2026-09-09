@@ -13,6 +13,8 @@
 #     grep -s api.wandb.ai ~/.netrc
 # export WANDB_API_KEY="..."
 
-export PPO_CF_WANDB_PROJECT="ppo-cf"
+# `:-` so a caller can pick a different project without editing this file --
+# slurm/10_e0_rbd8x8_test.sbatch sends its sweeps to "ppo-cf-sweeps".
+export PPO_CF_WANDB_PROJECT="${PPO_CF_WANDB_PROJECT:-ppo-cf}"
 export WANDB_SILENT="true"           # compute nodes have no interactive terminal
 export WANDB__SERVICE_WAIT="300"     # a slow upload must not hold a training job open

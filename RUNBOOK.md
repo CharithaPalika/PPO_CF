@@ -1,264 +1,274 @@
-# RUNBOOK — E1 on the cluster
+# RUNBOOK — running the PPO-CF experiments on the cluster
 
-Every command you type is in this file. `slurm/README.md` explains *why* and contains
-nothing to copy. **`HOW_TO_RUN.md` is the short path** — the nine commands from a
-fresh copy to 30 finished runs; come here for the detail behind any of them.
+Written for someone who has just cloned this repository and has an account on the
+**NUS SoC compute cluster** (`xlogin.comp.nus.edu.sg`). Every command you type is
+in this file. `slurm/README.md` explains *why* the pipeline is shaped the way it
+is and contains nothing to copy.
 
-Experiment: **E1** (`All_docs/Experiments.pdf` §8.2) on RedBlueDoors, three arms —
-`gae` (plain PPO), `cf` (PPO-CF), `shuf` (action-permuted CF control).
+## What you will be running
+
+| stage | environment | arms | seeds | frames | cost |
+|---|---|---|---|---|---|
+| `E1_RBD6` | RedBlueDoors-6x6 | gae / cf / shuf | 0–4 | 2M | ~17 core-h |
+| `E1_RBD8` | RedBlueDoors-8x8 | gae / cf / shuf | 0–4 | 2M | ~30 core-h |
+| `E0_reddoorbluedoor_test` | RedBlueDoors-8x8 | cf only | 0, 2 | 2M | ~5.5 core-h |
+
+The three arms differ in exactly one config field, `ppo.pg_mode`:
+
+| arm | `pg_mode` | what it is |
+|---|---|---|
+| `gae` | `gae` | plain PPO |
+| `cf` | `cf_all_action` | PPO-CF, full direct counterfactual oracle |
+| `shuf` | `cf_shuffled` | the same oracle vectors on *different* states — the control |
+
+E1 is the experiment (§7). E0 is a small standalone re-test on 8x8 (§8) and is
+the cheapest thing to run first if you just want to see the machinery work on
+something real.
 
 ---
 
-## 0. Copy the code from Windows to the cluster
+## 1. Get the code onto the cluster
 
-### One-time: an SSH config so you never type the jump host again
+```bash
+ssh -J <you>@stujump.comp.nus.edu.sg <you>@xlogin.comp.nus.edu.sg
+git clone <repo-url> ~/ppo_cf
+cd ~/ppo_cf
+```
 
-Create `%USERPROFILE%\.ssh\config` (Notepad is fine):
+A one-time `~/.ssh/config` on your own machine saves typing the jump host every
+time:
 
 ```
 Host stujump
     HostName stujump.comp.nus.edu.sg
-    User aniket
+    User <you>
 
 Host xlogin
     HostName xlogin.comp.nus.edu.sg
-    User aniket
+    User <you>
     ProxyJump stujump
 ```
 
-Then `ssh xlogin` and `scp ... xlogin:~/...` both work directly.
+Then `ssh xlogin` is enough.
 
-### First copy
+### If you copied files instead of cloning
 
-Windows `tar` (shipped with Windows 10+) makes an archive without the heavy
-directories, which `scp` alone cannot exclude:
-
-```cmd
-cd C:\path\to\Personal Projects
-tar --exclude=runs --exclude=figures --exclude=.venv --exclude=.git ^
-    --exclude=to_delete --exclude=artifacts --exclude=__pycache__ ^
-    -czf ppo_cf.tgz PPO_CF
-
-scp ppo_cf.tgz xlogin:~/
-ssh xlogin "mkdir -p ~/ppo_cf && tar xzf ~/ppo_cf.tgz -C ~/ppo_cf --strip-components=1 && rm ~/ppo_cf.tgz"
-```
-
-(In PowerShell use a backtick `` ` `` instead of `^` for line continuation, or put
-it all on one line.)
-
-### Updating a few files afterwards
-
-```cmd
-scp .\slurm\*.sbatch .\slurm\*.sh xlogin:~/ppo_cf/slurm/
-scp .\pipeline\*.py                xlogin:~/ppo_cf/pipeline/
-scp .\submit_e1.sh .\RUNBOOK.md    xlogin:~/ppo_cf/
-```
-
-### ALWAYS fix line endings after copying
-
-Windows writes `\r\n`. `sbatch` refuses such a script outright —
-
-```
-sbatch: error: Batch script contains DOS line breaks (\r\n)
-```
-
-— and a **sourced** file (`_prelude.sh`, `_submit_lib.sh`, `env.sh`) is worse: bash
-does not refuse it, it just takes the `\r` as part of the last word on every line
-and fails somewhere confusing. Run this on the cluster after every copy:
+`.gitattributes` pins `eol=lf`, so a **clone** is always correct. A copy from a
+Windows machine is not: `sbatch` refuses a script with CRLF line endings, and a
+*sourced* file (`_prelude.sh`, `_submit_lib.sh`, `env.sh`) is worse — bash does
+not refuse it, the `\r` just joins the last word on every line and fails
+somewhere that looks unrelated. After any copy:
 
 ```bash
-cd ~/ppo_cf && bash slurm/fix_line_endings.sh
+cd ~/ppo_cf
+bash slurm/fix_line_endings.sh
+chmod +x submit_*.sh slurm/*.sh slurm/*.sbatch      # scp drops the executable bit
 ```
 
-It converts only the project's own text files. Do **not** use
-`find . -type f -exec dos2unix {} +` — that walks `.venv/` (thousands of package
-files) and `runs/`, which is slow and pointless. The script falls back to `sed -i
-'s/\r$//'` when `dos2unix` is not installed.
+Copying with `scp` through the jump host, if you need it:
 
-If you use git, `.gitattributes` (already committed) pins `eol=lf` so a clone on
-the cluster is correct without any of this.
+```cmd
+scp -J <you>@stujump.comp.nus.edu.sg -r <path>\PPO_CF <you>@xlogin.comp.nus.edu.sg:~/ppo_cf
+```
 
 ---
 
-## 1. Nothing runs on the login node
+## 2. Nothing runs on the login node
 
-This is the rule the whole setup is built around, and it is enforced, not just
-documented: **every job script exits immediately if it is not inside a Slurm job**
-(the check is at the top of `slurm/_prelude.sh`, and repeated in the two scripts
-that do not source it). Running `bash slurm/02_run_chunks.sbatch` on xlogin prints
+This is the rule the whole setup is built around, and it is **enforced**: every
+job script exits immediately if it is not inside a Slurm job. Running
+`bash slurm/02_run_chunks.sbatch` on xlogin prints
 
 ```
 REFUSING: not inside a Slurm job. Batch scripts are submitted, not run.
 ```
 
-and stops.
+and stops. (`PPO_CF_ALLOW_LOGIN=1` is the escape hatch if you ever need it.)
 
 | Runs on **xlogin** | Runs on a **compute node** |
 |---|---|
-| `./submit_e1.sh` — calls `sbatch` and exits | training, analysis, `pip install`, wandb upload |
-| `sbatch slurm/*.sbatch` | everything else without exception |
-| `squeue` / `sacct` / `scancel` / `tail` on a log | |
-| `bash slurm/fix_line_endings.sh` — `sed` over ~60 small files | |
+| `sbatch ...`, `./submit_e1.sh` | training, analysis, `pip install`, wandb upload |
+| `squeue` / `sacct` / `scancel` / `tail` on a log | everything else, without exception |
+| `bash slurm/fix_line_endings.sh` (a `sed` over ~70 small files) | |
 
 **You can close your SSH session.** `sbatch` hands the job to Slurm and returns;
-the job does not belong to your shell. The whole chain — manifest → array →
-analyse → requeue-or-next-stage — is carried by Slurm job dependencies and by
-`03_analyse` calling `sbatch` from inside its own compute-node job, so it keeps
-going with nobody logged in. You do not need `tmux`, `nohup` or `screen`.
+the job does not belong to your shell. The chain — manifest → array → analyse →
+requeue-or-next-stage — is carried by Slurm job dependencies and by the analyse
+job calling `sbatch` from inside its own compute-node job. No `tmux`, no `nohup`.
 
 **Do not use `salloc` / `srun` for setup.** An interactive allocation dies when
-your SSH session drops, and `srun pip install ...` runs the *system* python, which
-is why it failed with `externally-managed-environment`. The venv build is a batch
-job: `sbatch slurm/00_create_venv.sbatch`.
+your SSH session drops, and `srun pip install ...` runs the *system* python and
+fails with `externally-managed-environment`. The venv build is a batch job (§4).
 
 ---
 
-## 2. Cluster settings (NUS SoC — already applied)
+## 3. Cluster settings
 
-Measured on xlogin, 2026-09-08:
+Measured on xlogin, already applied in the `#SBATCH` headers:
 
 | Partition | MaxTime | Priority factor | Used for |
 |---|---|---|---|
 | `normal` (default) | **3:00:00** | 4 | venv, verify, manifest, analyse, wandb sync |
-| `long` | 3-00:00:00 | 1 | **`02_run_chunks`** — the 12 h array |
+| `long` | 3-00:00:00 | 1 | `02_run_chunks` (12 h array), `10_e0_rbd8x8_test` (8 h) |
 
-The 8x8 CF units take ~5.5 h, so the array cannot run on `normal`; its header says
-`--partition=long`. Everything else is well under 3 h and takes `normal`'s higher
-priority factor. These are already set in the `#SBATCH` headers — nothing to edit.
+A single RedBlueDoors-8x8 CF unit runs ~2.75 h, so the arrays cannot use
+`normal`. Nothing to edit here.
 
-One thing is still unknown and worth 10 seconds:
+**One thing you must check for your own account:**
 
 ```bash
 sacctmgr show assoc user=$USER format=account,maxjobs,maxsubmit
 ```
 
 Put those two numbers into `MAX_SUBMIT` and `CONCURRENCY` at the top of
-`slurm/_submit_lib.sh` (currently 32 and 16). Exceeding the running-job cap does
-not get you more nodes; it gets submissions rejected or your priority reduced.
+`slurm/_submit_lib.sh` (they default to 32 and 16). Exceeding the running-job cap
+does not get you more nodes; it gets submissions rejected or your priority cut.
 
 ---
 
-## 3. Build the environment
+## 4. Build the environment
 
-The venv lives **inside the project** at `~/ppo_cf/.venv`, not in `$HOME/.venvs`,
-so the checkout carries its own interpreter: move or delete the project and the
-environment goes with it, and two checkouts can never share one by accident.
+The virtualenv lives **inside the project** at `~/ppo_cf/.venv`, so the checkout
+carries its own interpreter and two checkouts can never share one.
 
 ```bash
 cd ~/ppo_cf
-mkdir -p logs                       # Slurm will not create it, and --output needs it
+mkdir -p logs                       # Slurm will NOT create it, and --output needs it
 sbatch slurm/00_create_venv.sbatch
-tail -f logs/venv_<jobid>.out
+squeue -u $USER                     # wait for it to disappear
+cat logs/venv_<jobid>.out
 ```
 
-Read the **whole** log. Every import must pass. If several native packages fail
-identically the venv itself is damaged — rerun this script (it uses `--clear`)
-before investigating anything else.
+Read the whole log — every import under "4. verify" must pass. If several native
+packages fail identically the venv itself is damaged; just resubmit, the script
+uses `--clear`.
 
-Optional, for wandb — compute nodes here have outbound network, so a token in
-`~/.netrc` is all that is needed and it is shared with every compute node:
+### Weights & Biases (optional)
+
+Compute nodes here have outbound network, so a token in `~/.netrc` is enough and
+every node shares it:
 
 ```bash
-source .venv/bin/activate && wandb login
-grep -s api.wandb.ai ~/.netrc        # already logged in? then slurm/env.sh needs no key
+source .venv/bin/activate && wandb login && deactivate
+grep -s api.wandb.ai ~/.netrc       # already logged in? then nothing else to do
 ```
 
-To turn wandb off entirely: `export PPO_CF_WANDB=0` before submitting.
-`scalars.csv` is unaffected either way.
+To run without wandb entirely: `export PPO_CF_WANDB=0` before submitting.
+`scalars.csv` is written first and unconditionally, so nothing is ever lost to a
+tracking failure.
 
 ---
 
-## 4. Verify
+## 5. Verify
 
 ```bash
 sbatch slurm/00_verify.sbatch
 cat logs/verify_<jobid>.out
 ```
 
-Installs nothing. Checks, in order: no stray CRLF line endings; every repo module
-imports; every stage config builds; the MiniGrid simulator restore is bit-exact on
-both RedBlueDoors variants (the failure mode that yields plausible, *wrong*
-`A_CF`); and one real PPO-CF update completes with finite losses.
+Installs nothing. Checks, in order: no CRLF anywhere; every repository module
+imports; every stage config builds; the MiniGrid simulator restore is bit-exact
+on both RedBlueDoors variants (the failure mode that yields plausible but
+**wrong** `A_CF`); and one real PPO-CF update completes with finite losses. It
+must end with `verify OK`.
 
 ---
 
-## 5. Smoke the whole chain before the real thing
+## 6. Smoke the whole chain
 
-`PPO_CF_SMOKE_FRAMES` shrinks every unit to a few updates on a small batch, so the
-whole chain — manifest → a real array → merge → requeue → summary — runs in minutes
-instead of ~74 core-hours.
+`PPO_CF_SMOKE_FRAMES` shrinks every unit to a few updates, so manifest → array →
+merge → requeue → summary runs in minutes instead of ~47 core-hours. It writes
+only into `runs/_smoke/` and `artifacts/_smoke/`, a parallel namespace, so a
+smoke pass can never mark a real unit as done.
 
 ```bash
-export PPO_CF_SMOKE_FRAMES=8192      # propagates to every job via --export=ALL
+export PPO_CF_SMOKE_FRAMES=8192
 ./submit_e1.sh 6
-```
 
-It writes **nowhere near your real results**: smoke output goes to `runs/_smoke/` and
-`artifacts/_smoke/`, a parallel namespace, so a smoke pass can never mark a real unit
-as done. Delete those two directories whenever you like.
-
-Then check the one line that matters and stop:
-
-```bash
 cat logs/manifest_<jobid>.out        # MUST say "3 groups: gae, cf, shuf"
 squeue -u $USER
 ```
 
-Cancel it mid-array on purpose and resubmit — the only way to know your resume path
-works is to interrupt it once while the units are cheap:
+Then cancel it mid-array on purpose and resubmit — the only way to know the
+resume path works is to interrupt it once while the units are cheap:
 
 ```bash
 scancel <arrayjobid>
-./submit_e1.sh 6                     # the ledger keeps what finished; only the rest reruns
+./submit_e1.sh 6                     # finished units are skipped; only the rest rerun
 ```
 
 When you are satisfied:
 
 ```bash
-unset PPO_CF_SMOKE_FRAMES            # REQUIRED before the real run
+unset PPO_CF_SMOKE_FRAMES            # REQUIRED, or the real run finishes in seconds
+rm -rf runs/_smoke artifacts/_smoke
 ```
-
-## 6. Run it
-
-```bash
-./submit_e1.sh          # 16 chunks; 6x6 then 8x8, automatically
-./submit_e1.sh 12       # fewer chunks if your submit cap is tight
-```
-
-**Read `logs/manifest_<jobid>.out` before you walk away.** It prints the number of arms
-it actually saw. It must say 3. That line is the receipt for the two variable-mangling
-guards (`--export` splitting on commas, and `GROUPS` being a bash built-in — which is
-why the variable is called `PROJ_GROUPS`).
-
-Check `PPO_CF_SMOKE_FRAMES` is unset first, or you will queue 45 two-second jobs.
-
-To run 6x6 only and look at the result before paying for 8x8, change the last argument
-of `submit_stage` in `submit_e1.sh` from `"E1_RBD8"` to `"E1_RBD6"`.
-
-### What it costs
-
-Measured from this repo's own `runs/*/summary.json`, scaled to 2M frames:
-
-| stage | arm | frames | per seed | seeds | subtotal |
-|---|---|---|---|---|---|
-| `E1_RBD6` | gae | 2M | ~25 min | 5 | 2.1 h |
-| `E1_RBD6` | cf | 2M | ~1.5 h | 5 | 7.5 h |
-| `E1_RBD6` | shuf | 2M | ~1.5 h | 5 | 7.5 h |
-| `E1_RBD8` | gae | 2M | ~25 min | 5 | 2.1 h |
-| `E1_RBD8` | cf | 2M | ~5.5 h | 5 | 27.5 h |
-| `E1_RBD8` | shuf | 2M | ~5.5 h | 5 | 27.5 h |
-
-**30 units, ~74 core-hours, ~110 MB on disk.** 15 units per stage, so the default 16
-chunks gives one unit per task. At 16-way concurrency, roughly 6–8 h wall clock per
-stage. The 8x8 CF estimate assumes the doubled branch budget (`cf_horizon` 64 at
-`cf_subsample` 0.05 = 6.4, against 3.2 in the committed YAML).
 
 ---
 
-## 7. Watch it
+## 7. Run E1
 
 ```bash
-squeue -u $USER                                       # what is queued and running
+cd ~/ppo_cf
+./submit_e1.sh          # 16 chunks; E1_RBD6 then E1_RBD8, automatically
+./submit_e1.sh 12       # fewer chunks if your submit cap is tight
+```
+
+**Before you walk away, read one line:**
+
+```bash
+cat logs/manifest_<jobid>.out        # must say "3 groups: gae, cf, shuf"
+```
+
+That is the receipt for two variable-mangling guards — `sbatch --export` splits
+on commas with no escaping, and `GROUPS` is a bash built-in array (which is why
+the variable is called `PROJ_GROUPS`). If it says 1 group, stop and read §11.
+
+To run 6x6 only and look at the result before paying for 8x8, change the last
+argument of `submit_stage` in `submit_e1.sh` from `"E1_RBD8"` to `"E1_RBD6"`.
+
+30 units, ~47 core-hours, ~110 MB on disk. At 16-way concurrency, roughly 6–8 h
+wall clock per stage.
+
+---
+
+## 8. Run E0 — the RedBlueDoors-8x8 two-seed re-test
+
+Standalone, separate from E1: **PPO-CF only, seeds 0 and 2, 2M frames,
+`config/envs/redbluedoors8x8_cf.yaml` with no overrides at all.** This is the
+configuration that produced `runs/rbd8x8`, where seed 0 reached success 0.72.
+Seed 1 is skipped — it reached 0.00 with `cf_reward_coverage` 0.000 at the same
+settings.
+
+```bash
+sbatch slurm/10_e0_rbd8x8_test.sbatch     # array 0-1, one seed per task, in parallel
+tail -f logs/e0test_<jobid>_0.out
+```
+
+~2.75 h per seed on `long`. Two things differ from E1 deliberately: it logs
+**online** to wandb (project `ppo-cf-sweeps`) because only two tasks start at
+once, and it **keeps `trajectories.npz`** (~25 MB/seed) because the YAML says
+`record_trajectories: true` and this stage reproduces that config exactly.
+
+The same thing without Slurm, one seed at a time:
+
+```bash
+python -m scripts.run_e0_rbd8x8_test --dry-run     # print the config, run nothing
+python -m scripts.run_e0_rbd8x8_test --seeds 2
+```
+
+**Watch `cf_reward_coverage`, not just success.** It was 0.078 on the seed that
+learned and 0.000 on the seed that did not. Near zero means the counterfactual
+teacher is empty and the arm is running on critic noise, whatever the success
+curve is doing. RedBlueDoors-8x8 has large seed variance — do not read one seed
+as a result.
+
+---
+
+## 9. Watch it
+
+```bash
+squeue -u $USER                                       # queued and running
 squeue -u $USER --start                               # estimated start times
 squeue -j <id> -o "%.18i %.9P %.8T %R"                # WHY a job is still pending
 tail -f logs/run_<A>_0.out                            # follow one array task
@@ -266,7 +276,6 @@ grep -l Traceback logs/run_*_*.err | head             # which tasks raised
 sacct -j <id> --format=JobID,State,Elapsed,MaxRSS,ExitCode
 scancel <id>            # or: scancel -u $USER        # safe: the ledger keeps what finished
 scancel <arrayid>_[5-15]                              # cancel part of an array
-scontrol show job <id>                                # incl. the resolved --export environment
 ```
 
 Progress without reading logs:
@@ -278,94 +287,88 @@ column -s, -t artifacts/tables/E1_RBD6.csv | cut -c1-150
 
 ---
 
-## 8. When it finishes
+## 10. Results
 
-`03_analyse` writes, per stage:
+The analyse job writes, per stage:
 
 ```
 artifacts/tables/<STAGE>.csv            the ledger: one row per (arm, seed)
 artifacts/tables/<STAGE>_summary.csv    per-arm median / mean / std / n
-artifacts/status/<STAGE>.json           the Eq (32) paired tests
+artifacts/status/<STAGE>.json           the paired Eq (32) tests
 artifacts/figures/<STAGE>_success.png   mean success curve per arm, IQR band
 ```
 
-The Eq (32) checks are **reported, not blocking** — a failed ordering is a finding
-about the method, not a reason to skip the next environment. They are paired on seed
-with a 95% bootstrap CI, pre-registered in `pipeline/analyse.py` rather than chosen
-after looking at the numbers.
+The Eq (32) checks (`cf > gae` **and** `cf > shuf`) are **reported, not
+blocking** — a failed ordering is a finding about the method, not a reason to
+skip the next environment. They are paired on seed with a 95% bootstrap CI, and
+report `n<5` rather than a verdict when fewer than 5 paired seeds finished.
 
-### Copy the results home
+### Copy results off the cluster
 
-`rsync` is not on stock Windows, and `scp` cannot exclude anything, so pack on the
-cluster and pull one file. **`tar` here runs on the login node deliberately** — it is
-a file copy, not compute, the same class of action as `scp` itself.
+```cmd
+scp -J <you>@stujump.comp.nus.edu.sg -r <you>@xlogin.comp.nus.edu.sg:~/ppo_cf/artifacts "%USERPROFILE%\Downloads"
+```
+
+That is everything the analysis reads. For the per-run curves as well, pack on
+the cluster first so you move one file instead of thousands (`tar` on the login
+node is a file copy, not compute — the same class of action as `scp` itself):
 
 ```bash
-# on xlogin
-cd ~/ppo_cf
-tar --exclude='checkpoints' --exclude='*.npz' -czf ~/e1_results.tgz \
-    artifacts runs/e1_rbd*/*/scalars.csv runs/e1_rbd*/*/episodes.csv \
-    runs/e1_rbd*/*/config.json
-ls -lh ~/e1_results.tgz          # expect a few tens of MB
+cd ~/ppo_cf && tar --exclude='checkpoints' --exclude='*.npz' -czf ~/results.tgz \
+    artifacts runs/*/*/scalars.csv runs/*/*/episodes.csv runs/*/*/config.json
 ```
-
 ```cmd
-:: on Windows
-scp xlogin:~/e1_results.tgz .
-tar xzf e1_results.tgz
+scp -J <you>@stujump.comp.nus.edu.sg <you>@xlogin.comp.nus.edu.sg:~/results.tgz "%USERPROFILE%\Downloads"
 ```
 
-Checkpoints (~3 MB each) only for the seeds you actually want to probe:
+Analysis happens off the cluster from `artifacts/tables/*.csv` plus each run's
+`scalars.csv` / `episodes.csv`. The notebooks in `notebooks/` read exactly those.
 
-```cmd
-scp -r xlogin:~/ppo_cf/runs/e1_rbd6_cf/seed_0/checkpoints .\runs\e1_rbd6_cf\seed_0\
-```
-
-Then open the notebooks locally: everything they need is `artifacts/tables/*.csv`
-plus each run's `scalars.csv` / `episodes.csv`.
-
-### Upload the wandb runs
+### Upload the offline wandb runs (E1 only)
 
 ```bash
 sbatch slurm/04_sync_wandb.sbatch
 ```
 
-Compute nodes here have outbound network — `00_create_venv` pulls torch and wandb
-from PyPI on one — so this is an ordinary batch job on `normal`. Safe to resubmit:
-already-synced runs are skipped. If an upload fails, nothing is lost; the offline
-directories stay on disk.
-
-Do **not** run `wandb sync` on xlogin as a workaround. It is not needed, and a long
-upload started in an SSH session dies with the session.
+Safe to resubmit; already-synced runs are skipped. E0 logs online and needs
+nothing here. Do **not** run `wandb sync` on xlogin — a long upload started in an
+SSH session dies with the session.
 
 ---
 
-## 9. When something goes wrong
+## 11. When something goes wrong
 
-| Symptom | Do |
+| Symptom | Fix |
 |---|---|
-| manifest log says fewer than 3 groups | `PROJ_GROUPS` was mangled. Submit through `./submit_e1.sh`, never a hand-written `--export=ALL,PROJ_GROUPS=gae,cf,shuf` |
-| analyse says `STOPPING ... ZERO completed` | a fault hitting every unit, not a walltime cut. `tail -40 logs/run_*_0.err`. Nothing is lost |
-| `Segmentation fault` / `SIGILL` in a run log | `sbatch slurm/09_diagnose.sbatch` — one process per import names the culprit |
-| a unit failed but others finished | normal. Its row is absent; the next pass picks it up. `grep -A20 'FAILED' logs/run_*.out` |
-| `no venv at ...` | `sbatch slurm/00_create_venv.sbatch` (it builds `./.venv`) |
 | `sbatch: error: Batch script contains DOS line breaks` | `bash slurm/fix_line_endings.sh`, then resubmit |
-| `No such file or directory: 'requirements.txt'` in a job log | the job was submitted from somewhere other than the project root; `cd ~/ppo_cf` first |
 | `REFUSING: not inside a Slurm job` | you ran a batch script instead of submitting it: `sbatch slurm/<script>.sbatch` |
-| want to redo one unit | delete its row from `artifacts/tables/<STAGE>.csv` and its `<STAGE>_chunk_*.jsonl` line, then resubmit |
-| every Eq (32) check says `n<5` | fewer than 5 paired seeds finished. A bootstrap over 1–2 pairs is not evidence, so the gate refuses a verdict rather than printing a flattering one |
-| results look like a smoke run | `PPO_CF_SMOKE_FRAMES` was still exported. `unset` it; real and smoke never share a file |
-| want to rerun the summary only | `export STAGE=E1_RBD6 PROJ_GROUPS="gae,cf,shuf" PROJ_N_GROUPS=3 N_CHUNKS=16 PART_END=E1_RBD8 PASS_NO=0` then `sbatch --export=ALL slurm/03_analyse.sbatch` |
+| `No such file or directory: 'requirements.txt'` in a job log | submitted from the wrong directory; `cd ~/ppo_cf` first |
+| `no venv at ...` | `sbatch slurm/00_create_venv.sbatch` (it builds `./.venv`) |
+| `Permission denied` on `./submit_e1.sh` | `chmod +x submit_e1.sh`, or just `bash submit_e1.sh` |
+| Slurm error about the output file | `mkdir -p logs` — Slurm does not create the `--output` directory |
+| manifest log says fewer than 3 groups | submit through `./submit_e1.sh`, never a hand-written `--export=ALL,PROJ_GROUPS=...` |
+| analyse says `STOPPING ... ZERO completed` | a fault hitting every unit, not a walltime cut. `tail -40 logs/run_*_0.err`. Nothing is lost — the ledger keeps what finished |
+| a unit failed but others finished | normal. Its row is absent; the next pass picks it up. `grep -A20 FAILED logs/run_*.out` |
+| Eq (32) checks all say `n<5` | fewer than 5 paired seeds finished; resubmit — the ledger skips what is already done |
+| `Segmentation fault` / `SIGILL` in a run log | `sbatch slurm/09_diagnose.sbatch` — one process per import names the culprit |
+| results look like a smoke run | `PPO_CF_SMOKE_FRAMES` was still exported. `unset` it |
+| want to redo one unit | delete its row from `artifacts/tables/<STAGE>.csv` and its line from the matching `artifacts/chunks/<STAGE>_chunk_*.jsonl`, then resubmit |
+| want to rerun only the summary | `export STAGE=E1_RBD6 PROJ_GROUPS="gae,cf,shuf" PROJ_N_GROUPS=3 N_CHUNKS=16 PART_END=E1_RBD8 PASS_NO=0` then `sbatch --export=ALL slurm/03_analyse.sbatch` |
 
 ---
 
-## 10. Things this setup does NOT do, on purpose
+## 12. Things this setup does NOT do, on purpose
 
-- **No notebook execution on the cluster.** The notebooks currently train inside
-  themselves; running them here would duplicate the array's work. `03_analyse` writes
-  the ledger and the figures, and you analyse locally from those.
-- **No trajectory datasets.** `trajectories.npz` is 25 MB/seed and feeds NB03+ (E2/E3
-  distillation), not E1. Set `PPO_CF_RECORD_TRAJECTORIES=1` before submitting if you
-  want them — it costs ~1.5 GB instead of ~110 MB.
-- **No mid-run resume.** A unit is atomic. A killed unit is redone from zero, which is
-  why the walltime is sized from the slowest one.
+- **No notebook execution on the cluster.** The notebooks train inside
+  themselves, so running them here would duplicate the array's work. The analyse
+  job writes the ledger and figures; you analyse locally from those.
+- **No trajectory datasets in E1.** `trajectories.npz` is ~25 MB/seed and feeds
+  the later distillation work, not E1. Set `PPO_CF_RECORD_TRAJECTORIES=1` before
+  submitting if you want them. E0 keeps them, as described in §8.
+- **No mid-run resume.** One unit = one `(stage, arm, seed)` training run, and it
+  is atomic. A killed unit is redone from zero, which is why the array walltime
+  is sized from the slowest unit rather than the average.
+- **A fresh clone has no `runs/`.** It is gitignored. That is fine for
+  RedBlueDoors — every `redbluedoors*_cf.yaml` has `init_from: null`. The DoorKey
+  curriculum configs do warm-start from an earlier rung's checkpoint, so those
+  need the previous rung trained first.

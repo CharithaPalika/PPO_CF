@@ -62,8 +62,8 @@ diagnostic that justifies pulling it.
 
 ---
 
-## Running E1 on the cluster
+## Running the experiments on the cluster
 
-- **`HOW_TO_RUN.md`** — the short path: copy up, build, verify, smoke, submit.
-- **`RUNBOOK.md`** — the reference: every command, cost table, recovery.
-- **`slurm/README.md`** — why the pipeline is shaped the way it is.
+- **`RUNBOOK.md`** — start here. Clone, build, verify, smoke, submit, collect
+  results, troubleshoot. Written for someone setting this up from scratch.
+- **`slurm/README.md`** — why the pipeline is shaped the way it is; no commands.

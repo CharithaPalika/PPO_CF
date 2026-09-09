@@ -41,7 +41,7 @@ env:
   layout_seed_mode: cycle
 
 ppo:
-  total_timesteps: 3000000
+  total_timesteps: 3000000 #25000000 # People use 10M for PPO in this env
   n_steps: 128
   n_epochs: 4
   n_minibatches: 8

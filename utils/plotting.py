@@ -385,6 +385,31 @@ def plot_minigrid_visitation(traj, grid_shape=None, figsize=(12, 3.6)):
     return fig
 
 
+#: The sub-goal columns were renamed when the code stopped being DoorKey-only:
+#: `key_rate_100` / `door_rate_100` became the environment-neutral
+#: `subgoal1_rate_100` / `subgoal2_rate_100` (RedBlueDoors' rungs are red door /
+#: blue door, not key / door). Runs recorded before the rename still have the old
+#: names in their scalars.csv, so anything reading these columns must accept both
+#: -- indexing one spelling directly is a KeyError waiting for whichever run you
+#: did not have in mind.
+SUBGOAL_ALIASES = {1: ("subgoal1_rate_100", "key_rate_100"),
+                   2: ("subgoal2_rate_100", "door_rate_100")}
+
+
+def subgoal_col(df, n: int) -> str | None:
+    """Name of sub-goal `n`'s column in `df`, new spelling or old. None if absent.
+
+        col = subgoal_col(d, 2)
+        final = float(d[col].iloc[-1]) if col else float("nan")
+    """
+    if n not in SUBGOAL_ALIASES:
+        raise ValueError(f"sub-goal must be 1 or 2, got {n!r}")
+    for name in SUBGOAL_ALIASES[n]:
+        if name in df.columns:
+            return name
+    return None
+
+
 def plot_subgoal_ladder(scalars: dict, labels=None, figsize=(13, 3.8)):
     """subgoal1 -> subgoal2 -> success, from scalars.csv.
 
@@ -407,9 +432,7 @@ def plot_subgoal_ladder(scalars: dict, labels=None, figsize=(13, 3.8)):
     plot without being re-run.
     """
     labels = tuple(labels) if labels else ("Sub-goal 1", "Sub-goal 2")
-    cols = [("subgoal1_rate_100", "key_rate_100"),
-            ("subgoal2_rate_100", "door_rate_100"),
-            ("success_rate_100", None)]
+    cols = [SUBGOAL_ALIASES[1], SUBGOAL_ALIASES[2], ("success_rate_100", None)]
     titles = [labels[0], labels[1], "Solved"]
     colours = ["#3b6ea5", "#8a6d3b", "#4f8a5b"]
 

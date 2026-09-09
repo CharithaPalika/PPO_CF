@@ -86,21 +86,39 @@ STAGES: dict[str, dict] = {
         # cf_horizon 64, cf_subsample 0.025, alpha_cf 0.1 all come from the YAML.
         "overrides": {"ppo.total_timesteps": FRAMES},
     },
-    # RedBlueDoors-8x8. cf_horizon raised 32 -> 64 to match the coverage
-    # measurement made on 6x6 (H=32 gave coverage 0.002, i.e. the degenerate
-    # critic-difference estimator). cf_subsample stays 0.05, so the branch
-    # budget DOUBLES from 3.2 to 6.4 and a CF seed costs ~5.5 h instead of
-    # ~2.75 h. That is a deliberate choice, not an oversight.
+    # RedBlueDoors-8x8. cf_horizon comes from config/envs/redbluedoors8x8_cf.yaml
+    # (32) -- it was briefly overridden to 64 here, which doubled the branch
+    # budget from 3.2 to 6.4 and the cost from ~2.75 h to ~5.5 h per CF seed.
+    # Reverted 2026-09-09: the YAML is the single source of truth for the
+    # estimator, so the cluster, the notebooks and `scripts/train.py` all agree.
     "E1_RBD8": {
         "env_config": "redbluedoors8x8_cf",
         "seeds": SEEDS,
-        "overrides": {"ppo.total_timesteps": FRAMES, "ppo.cf_horizon": 64},
+        "overrides": {"ppo.total_timesteps": FRAMES},
+    },
+
+    # ---- E0: a two-seed re-test of the setting that produced 0.72 ---------
+    # DELIBERATELY EMPTY OVERRIDES. This is the config as
+    # `01_ppo_baseline_redbluedoor.ipynb` ran it -- ENV_CONFIG
+    # "redbluedoors8x8_cf" with OVERRIDES = {} -- and `runs/rbd8x8/config.json`
+    # confirms it byte for byte. Anything typed here instead of read from the
+    # YAML is a chance for the two to drift, which is the whole point of the
+    # stage. PPO-CF only; submit with groups "cf".
+    #
+    # Seeds 0 and 2: seed 0 reached success 0.72 and is the reproduction check,
+    # seed 2 is fresh. Seed 1 is skipped -- it reached 0.00 with
+    # cf_reward_coverage 0.000 at this same horizon.
+    "E0_reddoorbluedoor_test": {
+        "env_config": "redbluedoors8x8_cf",
+        "seeds": [0, 2],
+        "overrides": {},
     },
 }
 
 #: E1_RBD6 finishes -> E1_RBD8 is submitted automatically. `PART_END` in the
 #: submit script is what stops the chain.
-CHAIN_NEXT = {"E1_RBD6": "E1_RBD8", "E1_RBD8": None}
+CHAIN_NEXT = {"E1_RBD6": "E1_RBD8", "E1_RBD8": None,
+              "E0_reddoorbluedoor_test": None}   # stands alone, chains nowhere
 
 #: Stages with no parallel work at all (none in E1).
 ANALYSIS_ONLY: set[str] = set()

@@ -20,7 +20,7 @@ env:
   layout_seed_mode: cycle
 
 ppo:
-  total_timesteps: 1500000
+  total_timesteps: 750000 #1500000
   n_steps: 128
   n_epochs: 4
   n_minibatches: 8
@@ -31,7 +31,7 @@ ppo:
   gae_lambda: 0.95
   clip_coef: 0.2
   clip_vloss: true
-  ent_coef: 0.01
+  ent_coef: 0.1 #0.01
   vf_coef: 0.5
   max_grad_norm: 0.5
   target_kl: null
@@ -59,7 +59,7 @@ run:
   record_trajectories: true
   eval_every_updates: 0
   eval_episodes: 20
-  init_from: None #runs/doorkey5x5/seed_{seed}/checkpoints/ckpt_100.pt
+  init_from: null #runs/doorkey5x5/seed_{seed}/checkpoints/ckpt_100.pt
 
 reward:
   potential_shaping: false

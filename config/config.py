@@ -295,14 +295,12 @@ class PPOConfig:
 
 @dataclass(frozen=True)
 class DistillConfig:
-    """E2: uniform sparse CF labels, used locally or distilled globally.
+    """Sparse CF labels for queried or distilled perturbation arms.
 
-    There is deliberately no uncertainty threshold, confidence gate, novelty
-    count, or active query rule here.  E2 isolates amortisation: labels are
-    uniform. `beta` is the shared perturbation strength: the queried arm uses
-    the exact teacher only at queried states, while the student mean guides
-    every state in the distilled arm. E3 will reuse the ensemble's variance
-    only to decide which states receive future labels.
+    E2 isolates amortisation with uniform labels. E3 keeps the same label and
+    branch budget but changes `query_strategy` so the student asks the teacher
+    about high-uncertainty states, optionally weighted by policy leverage.
+    `beta` is the shared perturbation strength.
     """
 
     ensemble_size: int = 5
@@ -314,6 +312,9 @@ class DistillConfig:
     learning_rate: float = 3e-4
     beta: float = 0.25
     beta_ramp_updates: int = 10
+    query_strategy: str = "uniform"      # uniform | uncertainty | uncertainty_leverage
+    query_min_labels_before_active: int | None = None
+    query_leverage_eps: float = 1e-8
 
 
 # --------------------------------------------------------------------------- #
@@ -437,7 +438,8 @@ class ExperimentConfig:
              f"beta={self.distill.beta:g}"
              if self.ppo.pg_mode in ("cf_queried_perturb", "landscape_distill") else ""),
             (f"distillation      M={self.distill.ensemble_size}, labels before use="
-             f"{self.distill.min_labels_before_use}, beta={self.distill.beta:g}"
+             f"{self.distill.min_labels_before_use}, beta={self.distill.beta:g}, "
+             f"query={self.distill.query_strategy}"
              if self.ppo.pg_mode == "landscape_distill" else ""),
             f"reward shaping     {'on' if self.reward.active else 'off'}",
             f"warm start         {self.run.init_from or 'none'}",
@@ -595,6 +597,19 @@ def _validate(cfg: ExperimentConfig) -> None:
         raise ValueError("distill.min_labels_before_use must lie in [0, replay_capacity]")
     if cfg.distill.beta < 0.0:
         raise ValueError("distill.beta must be non-negative")
+    if cfg.distill.query_strategy not in ("uniform", "uncertainty", "uncertainty_leverage"):
+        raise ValueError(
+            "distill.query_strategy must be uniform|uncertainty|uncertainty_leverage, "
+            f"got {cfg.distill.query_strategy!r}"
+        )
+    if cfg.distill.query_min_labels_before_active is not None:
+        if (cfg.distill.query_min_labels_before_active < 0
+                or cfg.distill.query_min_labels_before_active > cfg.distill.replay_capacity):
+            raise ValueError(
+                "distill.query_min_labels_before_active must lie in [0, replay_capacity]"
+            )
+    if cfg.distill.query_leverage_eps < 0.0:
+        raise ValueError("distill.query_leverage_eps must be non-negative")
     if cfg.ppo.pg_mode in ("cf_queried_perturb", "landscape_distill") and cfg.ppo.norm_adv == "minibatch":
         raise ValueError(
             f"{cfg.ppo.pg_mode} requires norm_adv='batch' or 'none': independently "

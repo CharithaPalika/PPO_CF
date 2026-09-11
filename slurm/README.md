@@ -182,9 +182,9 @@ repairs a copy, and `00_verify.sbatch` section 0 refuses to pass with any CRLF l
 | `env.sh` | credentials. **gitignored**, never `cat`'d |
 | `fix_line_endings.sh` | CRLF → LF over the project's own text files, after a copy from Windows |
 | `_prelude.sh` | sourced by every `.sbatch`: the login-node guard, root, venv, threads, headless backend, wandb mode, the `PROJ_GROUPS` guard |
-| `_submit_lib.sh` | sourced by `submit_e1.sh`: how a stage is submitted. **Your account's job caps go at the top of this file.** |
+| `_submit_lib.sh` | sourced by `experiment_1_6_envs`, `submit_e2.sh`, and `submit_e3.sh`: how a stage is submitted. **Your account's job caps go at the top of this file.** |
 | `00_create_venv.sbatch` | builds the project-owned venv on a compute node |
-| `00_verify.sbatch` | installs nothing; proves the venv, the configs, the simulator restore, and one real PPO-CF update |
+| `00_verify.sbatch` | installs nothing; proves the venv, the configs, the simulator restore, and real PPO-CF/E2/E3 updates |
 | `01_manifest.sbatch` | builds the run list for one stage |
 | `02_run_chunks.sbatch` | the array |
 | `03_analyse.sbatch` | merge → requeue, or summarise and chain on |

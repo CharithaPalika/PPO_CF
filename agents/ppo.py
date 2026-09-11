@@ -244,7 +244,11 @@ class PPOTrainer:
         x = torch.as_tensor(self._scale(raw), dtype=torch.float32, device=self.device)
         return self.model.action_probs(x).cpu().numpy()
 
-    def compute_counterfactual(self) -> tuple[np.ndarray, np.ndarray, dict]:
+    def compute_counterfactual(
+        self,
+        query_scores: np.ndarray | None = None,
+        query_components: dict[str, np.ndarray] | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, dict]:
         """Q_g on a SUBSAMPLE of rollout states. Returns (q, mask, diagnostics).
 
         `q` is (B, K) with rows outside the subsample left at zero; `mask` says
@@ -261,7 +265,22 @@ class PPOTrainer:
         sims = self.buffer.sim_state[:T].reshape(B, -1)
 
         n_sub = max(1, int(round(cfg.cf_subsample * B)))
-        idx = self._cf_rng.choice(B, size=n_sub, replace=False)
+        if query_scores is None:
+            idx = self._cf_rng.choice(B, size=n_sub, replace=False)
+            selection_active = False
+            scores = None
+        else:
+            scores = np.asarray(query_scores, dtype=np.float64).reshape(-1)
+            if scores.shape != (B,):
+                raise ValueError(f"query_scores has shape {scores.shape}, expected {(B,)}")
+            scores = np.nan_to_num(scores, nan=-np.inf, posinf=np.finfo(np.float64).max)
+            if np.all(np.isneginf(scores)):
+                idx = self._cf_rng.choice(B, size=n_sub, replace=False)
+                selection_active = False
+            else:
+                tie = self._cf_rng.random(B)
+                idx = np.lexsort((tie, -scores))[:n_sub]
+                selection_active = True
 
         q_sub, diag = self.oracle.q_g(
             sims[idx], self._probs_np, self._values_np,
@@ -283,6 +302,35 @@ class PPOTrainer:
             q[idx] = q_sub[perm]
 
         diag["n_cf_states"] = n_sub
+        diag["query_active"] = float(selection_active)
+        if scores is not None:
+            selected = np.zeros(B, dtype=bool)
+            selected[idx] = True
+            unselected = ~selected
+            finite = scores[np.isfinite(scores)]
+            diag["query_score_mean"] = float(np.mean(finite)) if len(finite) else float("nan")
+            diag["query_score_selected_mean"] = float(np.mean(scores[selected]))
+            diag["query_score_unselected_mean"] = (
+                float(np.mean(scores[unselected])) if bool(unselected.any()) else float("nan")
+            )
+            diag["query_score_selected_p10"] = float(np.percentile(scores[selected], 10))
+        else:
+            diag["query_score_mean"] = float("nan")
+            diag["query_score_selected_mean"] = float("nan")
+            diag["query_score_unselected_mean"] = float("nan")
+            diag["query_score_selected_p10"] = float("nan")
+        for name, values in (query_components or {}).items():
+            arr = np.asarray(values, dtype=np.float64).reshape(-1)
+            if arr.shape != (B,):
+                raise ValueError(f"query component {name!r} has shape {arr.shape}, expected {(B,)}")
+            selected = np.zeros(B, dtype=bool)
+            selected[idx] = True
+            unselected = ~selected
+            diag[f"query_{name}_mean"] = float(np.nanmean(arr))
+            diag[f"query_{name}_selected_mean"] = float(np.nanmean(arr[selected]))
+            diag[f"query_{name}_unselected_mean"] = (
+                float(np.nanmean(arr[unselected])) if bool(unselected.any()) else float("nan")
+            )
         return q, mask, diag
 
     # ---------------------------------------------------- E2 distillation #
@@ -300,7 +348,9 @@ class PPOTrainer:
         frac = min(1.0, (update - self._distill_start_update + 1) / cfg.beta_ramp_updates)
         return float(cfg.beta * frac)
 
-    def predict_distilled_landscape(self, update: int) -> tuple[np.ndarray, float]:
+    def predict_distilled_landscape(
+        self, update: int
+    ) -> tuple[np.ndarray, float, np.ndarray | None, dict[str, np.ndarray], dict[str, float]]:
         """Detached student landscape for the *current* rollout.
 
         This runs before the current rollout's labels are added to replay.  The
@@ -312,9 +362,35 @@ class PPOTrainer:
         B = T * N
         obs = self.buffer.obs[:T].reshape(B, -1)
         pi = self.buffer.probs[:T].reshape(B, -1)
-        raw = self.landscape.predict(obs)
-        centred = raw - (pi * raw).sum(axis=1, keepdims=True)
-        return centred.astype(np.float32), self._distill_beta(update)
+        centred, uncertainty, leverage = self.landscape.statistics(
+            obs, pi, leverage_eps=self.cfg.distill.query_leverage_eps
+        )
+
+        strategy = self.cfg.distill.query_strategy
+        active_after = self.cfg.distill.query_min_labels_before_active
+        if active_after is None:
+            active_after = self.cfg.distill.min_labels_before_use
+        query_ready = self.landscape_replay.size >= int(active_after)
+        if strategy == "uncertainty" and query_ready:
+            query_scores = uncertainty
+        elif strategy == "uncertainty_leverage" and query_ready:
+            query_scores = uncertainty * leverage
+        else:
+            query_scores = None
+
+        diag = {
+            "distill_query_ready": float(query_ready),
+            "distill_query_uncertainty_mean": float(np.mean(uncertainty)),
+            "distill_query_uncertainty_p90": float(np.percentile(uncertainty, 90)),
+            "distill_query_leverage_mean": float(np.mean(leverage)),
+            "distill_query_leverage_p90": float(np.percentile(leverage, 90)),
+            "distill_query_score_mean": (
+                float(np.mean(query_scores)) if query_scores is not None else float("nan")
+            ),
+            "distill_query_active_strategy": float(strategy != "uniform"),
+        }
+        query_components = {"uncertainty": uncertainty, "leverage": leverage}
+        return centred.astype(np.float32), self._distill_beta(update), query_scores, query_components, diag
 
     @staticmethod
     def _policy_direction(v: np.ndarray, pi: np.ndarray) -> np.ndarray:
@@ -343,6 +419,8 @@ class PPOTrainer:
         d_pred = self._policy_direction(pred, pi)
         d_target = self._policy_direction(target, pi)
         heldout_pg_error = float(np.linalg.norm(d_pred - d_target, axis=1).mean()) if len(target) else float("nan")
+        heldout_teacher_pg_norm = float(np.linalg.norm(d_target, axis=1).mean()) if len(target) else float("nan")
+        heldout_student_pg_norm = float(np.linalg.norm(d_pred, axis=1).mean()) if len(target) else float("nan")
         denom = np.linalg.norm(d_pred, axis=1) * np.linalg.norm(d_target, axis=1)
         cosine = np.divide((d_pred * d_target).sum(axis=1), denom,
                            out=np.zeros_like(denom), where=denom > 1e-12)
@@ -363,6 +441,8 @@ class PPOTrainer:
             "distill_target_centering": target_centering,
             "distill_prediction_centering": pred_centering,
             "distill_heldout_pg_error": heldout_pg_error,
+            "distill_heldout_teacher_pg_norm": heldout_teacher_pg_norm,
+            "distill_heldout_student_pg_norm": heldout_student_pg_norm,
             "distill_heldout_direction_cos": heldout_cos,
             "distill_heldout_best_action_agreement": best_agreement,
         }
@@ -887,6 +967,9 @@ class PPOTrainer:
             q_cf = cf_mask = None
             cf_diag = {}
             distill_landscape = None
+            distill_query_scores = None
+            distill_query_components = None
+            distill_diag = {}
             # The exact queried arm uses its teacher perturbation immediately.
             # The student arm has its fixed label warm-up/ramp because it must
             # learn from earlier rollouts before predicting this one.
@@ -895,9 +978,13 @@ class PPOTrainer:
             # Predict before querying/learning current labels.  This ordering
             # is the E2 non-leakage contract.
             if self.landscape is not None:
-                distill_landscape, perturb_beta = self.predict_distilled_landscape(update)
+                (distill_landscape, perturb_beta,
+                 distill_query_scores, distill_query_components,
+                 distill_diag) = self.predict_distilled_landscape(update)
             if self.oracle is not None:
-                q_cf, cf_mask, cf_diag = self.compute_counterfactual()
+                q_cf, cf_mask, cf_diag = self.compute_counterfactual(
+                    distill_query_scores, distill_query_components
+                )
                 if not self._cf_validated:
                     self._validate_oracle(q_cf, cf_mask)
                     self._cf_validated = True
@@ -908,6 +995,7 @@ class PPOTrainer:
                 perturb_beta=perturb_beta,
             )
             stats.update({f"cf_{k}": float(v) for k, v in cf_diag.items()})
+            stats.update(distill_diag)
             if self.landscape is not None:
                 assert q_cf is not None and cf_mask is not None and distill_landscape is not None
                 stats.update(self.learn_distilled_landscape(q_cf, cf_mask, distill_landscape))

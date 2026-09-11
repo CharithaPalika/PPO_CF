@@ -25,6 +25,8 @@ def main() -> int:
     ap.add_argument("--steps", type=int, default=1, help="PPO updates to run")
     ap.add_argument("--env", default="redbluedoors6x6_cf")
     ap.add_argument("--pg_mode", default="cf_all_action")
+    ap.add_argument("--query_strategy", default="uniform",
+                    choices=("uniform", "uncertainty", "uncertainty_leverage"))
     a = ap.parse_args()
 
     from config import make_config
@@ -48,6 +50,8 @@ def main() -> int:
         # payload rather than spending the whole smoke run in E2's real 1,024
         # label warm-up.
         overrides.update({"distill.min_labels_before_use": 4,
+                          "distill.query_min_labels_before_active": 4,
+                          "distill.query_strategy": a.query_strategy,
                           "distill.beta_ramp_updates": 0,
                           "distill.train_steps_per_rollout": 1})
     cfg = make_config(a.env, **overrides)
@@ -76,9 +80,18 @@ def main() -> int:
     if a.pg_mode in ("cf_queried_perturb", "landscape_distill"):
         payload = float(last.get("perturb_payload_rms", float("nan")))
         if not math.isfinite(payload):
-            print(f"FAILED: E2 perturbation payload is not finite ({payload})", file=sys.stderr)
+            print(f"FAILED: perturbation payload is not finite ({payload})", file=sys.stderr)
             return 1
         print(f"  perturb rms   {payload:+.6f}")
+    if a.pg_mode == "landscape_distill" and a.query_strategy != "uniform":
+        active = float(last.get("cf_query_active", 0.0))
+        selected = float(last.get("cf_query_score_selected_mean", float("nan")))
+        unselected = float(last.get("cf_query_score_unselected_mean", float("nan")))
+        if active <= 0.0 or not math.isfinite(selected) or not math.isfinite(unselected):
+            print("FAILED: E3 active selector did not produce finite query diagnostics",
+                  file=sys.stderr)
+            return 1
+        print(f"  query scores  selected={selected:.6g} unselected={unselected:.6g}")
     print("smoke OK")
     return 0
 

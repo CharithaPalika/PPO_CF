@@ -1,11 +1,9 @@
-"""Recent CF-label replay and a detached landscape-student ensemble for E2.
+"""Recent CF-label replay and a detached landscape-student ensemble for E2/E3.
 
-The expensive teacher labels only a small uniform subset of PPO rollout states.
-The student learns a policy-relative all-action landscape from those labels;
-PPO then consumes the *detached* prediction at every rollout state.  E2 does
-not use uncertainty for either gating or query selection -- that is reserved
-for E3 -- although the independent ensemble is retained so E3 can reuse the
-same student implementation later.
+The expensive teacher labels only a small subset of PPO rollout states.  In E2
+that subset is uniform.  In E3 the same budget is allocated by ensemble
+uncertainty, optionally multiplied by the policy-relevant leverage of the
+student mean.  PPO consumes only detached predictions.
 """
 
 from __future__ import annotations
@@ -76,7 +74,7 @@ class LandscapeTrainStats:
 
 
 class LandscapeEnsemble:
-    """Independent bootstrap students; only their mean is used in E2."""
+    """Independent bootstrap students for mean prediction and E3 uncertainty."""
 
     def __init__(self, *, obs_dim: int, n_actions: int, hidden_sizes, activation: str,
                  encoder: str, obs_shape, n_members: int, learning_rate: float,
@@ -98,10 +96,46 @@ class LandscapeEnsemble:
             self.optimizers.append(torch.optim.Adam(model.parameters(), lr=learning_rate))
 
     @torch.no_grad()
-    def predict(self, obs: np.ndarray) -> np.ndarray:
+    def predict_members(self, obs: np.ndarray) -> np.ndarray:
         x = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
         preds = [m(x) for m in self.models]
-        return torch.stack(preds, dim=0).mean(dim=0).cpu().numpy().astype(np.float32)
+        return torch.stack(preds, dim=0).cpu().numpy().astype(np.float32)
+
+    @torch.no_grad()
+    def predict(self, obs: np.ndarray) -> np.ndarray:
+        return self.predict_members(obs).mean(axis=0).astype(np.float32)
+
+    @torch.no_grad()
+    def statistics(
+        self, obs: np.ndarray, pi: np.ndarray, *, leverage_eps: float
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return centred mean, epistemic uncertainty, and leverage per state.
+
+        The contraction with C_pi keeps both uncertainty and leverage in the
+        action-space directions the PPO objective can actually move.
+        """
+        pi = np.asarray(pi, dtype=np.float32)
+        members = self.predict_members(obs)
+        centred = members - (pi[None, :, :] * members).sum(axis=2, keepdims=True)
+        mean = centred.mean(axis=0)
+
+        if centred.shape[0] <= 1:
+            uncertainty = np.zeros(len(pi), dtype=np.float32)
+        else:
+            diff = centred - mean[None, :, :]
+            denom = float(centred.shape[0] - 1)
+            contracted = (
+                (pi[None, :, :] * (diff * diff)).sum(axis=2)
+                - (pi[None, :, :] * diff).sum(axis=2) ** 2
+            ).sum(axis=0) / denom
+            uncertainty = np.sqrt(np.maximum(contracted, 0.0)).astype(np.float32)
+
+        lev = (
+            (pi * (mean * mean)).sum(axis=1)
+            - (pi * mean).sum(axis=1) ** 2
+        )
+        leverage = np.sqrt(np.maximum(lev, 0.0) + float(leverage_eps)).astype(np.float32)
+        return mean.astype(np.float32), uncertainty, leverage
 
     def train(self, replay: LandscapeReplay, *, steps: int, batch_size: int) -> LandscapeTrainStats:
         if replay.size == 0 or steps <= 0:

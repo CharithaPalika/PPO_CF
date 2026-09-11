@@ -63,9 +63,14 @@ python - <<'PY'
 import sys
 from pipeline.stages import STAGES, GROUPS_ALL, build_config
 for stage in STAGES:
-    if stage == "E2_ALL":
-        continue  # pooled manifest; its units are the four concrete E2 stages
-    groups = ("queried", "distill") if stage.startswith("E2_") else GROUPS_ALL
+    if stage in ("E2_ALL", "E3_ALL"):
+        continue  # pooled manifests; units are concrete environment stages
+    if stage.startswith("E2_"):
+        groups = ("queried", "distill")
+    elif stage.startswith("E3_"):
+        groups = ("uniform", "uncertainty", "active")
+    else:
+        groups = GROUPS_ALL
     for group in groups:
         cfg = build_config(stage, group, 0)
         print(f"  {stage:10s} {group:5s} {cfg.env.env_id:32s} "
@@ -108,12 +113,14 @@ for env_id in ("MiniGrid-RedBlueDoors-6x6-v0", "MiniGrid-RedBlueDoors-8x8-v0"):
     print(f"  {env_id}: restore exact over {n} transitions")
 RESTORE
 echo
-echo "--- 4. real E2 perturbation updates, end to end ---"
+echo "--- 4. real E2/E3 perturbation updates, end to end ---"
 # An import check passes on a machine where the first backward pass segfaults.
 python -m pipeline.smoke --steps 2 --pg_mode cf_queried_perturb
 rm -rf runs/_smoke || true
 python -m pipeline.smoke --steps 2 --pg_mode landscape_distill
 rm -rf runs/_smoke || true
+python -m pipeline.smoke --steps 2 --pg_mode landscape_distill --query_strategy uncertainty_leverage
+rm -rf runs/_smoke || true
 
 echo
-echo "verify OK -- safe to submit ./submit_e2.sh"
+echo "verify OK -- safe to submit ./submit_e2.sh or ./submit_e3.sh"

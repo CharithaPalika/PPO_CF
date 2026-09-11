@@ -57,6 +57,10 @@ ARM_PG_MODE = {
     # or a distilled prediction at every rollout state.
     "queried": "cf_queried_perturb",
     "distill": "landscape_distill",
+    # E3: same distilled perturbation arm, different state-query selectors.
+    "uniform": "landscape_distill",
+    "uncertainty": "landscape_distill",
+    "active": "landscape_distill",
 }
 GROUPS_ALL = ["gae", "cf", "shuf"]
 
@@ -66,6 +70,15 @@ ALGO_TAG = {
     "shuf": "ppo-cf-shuffled",
     "queried": "ppo-cf-queried-perturb",
     "distill": "ppo-cf-distilled",
+    "uniform": "ppo-cf-distilled-uniform",
+    "uncertainty": "ppo-cf-distilled-uncertainty",
+    "active": "ppo-cf-distilled-uncertainty-leverage",
+}
+
+E3_QUERY_STRATEGY = {
+    "uniform": "uniform",
+    "uncertainty": "uncertainty",
+    "active": "uncertainty_leverage",
 }
 
 #: Trajectory datasets are 25 MB/seed and feed NB03+ (E2/E3 distillation), not
@@ -82,10 +95,12 @@ LOG_EVERY_UPDATES = 2
 
 #: Default paired seeds for cluster sweeps.
 SEEDS = list(range(5))
+E3_SEEDS = list(range(3))
 
 #: E2 perturbation-strength sweep. Beta=0 is already represented by the PPO
 #: baseline in E1, so E2 evaluates three non-zero strengths only.
 E2_BETAS = (0.25, 0.75, 1.5)
+E3_BETA = 0.75
 
 #: Frame override used only by the historical RedBlue E1 stages below. The new
 #: EXP1_* stages use their YAML budgets as the source of truth.
@@ -222,6 +237,39 @@ STAGES: dict[str, dict] = {
         "seeds": SEEDS,
         "overrides": {},
     },
+
+    # ---- E3: uncertainty-driven CF-label allocation ----------------------
+    # Same environments and 2% label/branch budget as E2, but beta is fixed at
+    # 0.75 and the arms differ only in which rollout states get teacher labels.
+    "E3_TAXI": {
+        "env_config": "taxi_cf",
+        "env_tag": "taxi",
+        "seeds": E3_SEEDS,
+        "overrides": {"ppo.cf_subsample": 0.02, "ppo.norm_adv": "batch"},
+    },
+    "E3_DK6": {
+        "env_config": "doorkey6x6_cf",
+        "env_tag": "doorkey6x6",
+        "seeds": E3_SEEDS,
+        "overrides": {"ppo.cf_subsample": 0.02, "ppo.norm_adv": "batch"},
+    },
+    "E3_UNLOCKPICKUP": {
+        "env_config": "unlockpickup_cf",
+        "env_tag": "unlockpickup",
+        "seeds": E3_SEEDS,
+        "overrides": {"ppo.cf_subsample": 0.02, "ppo.norm_adv": "batch"},
+    },
+    "E3_RBD6": {
+        "env_config": "redbluedoors6x6_cf",
+        "env_tag": "redbluedoors6x6",
+        "seeds": E3_SEEDS,
+        "overrides": {"ppo.cf_subsample": 0.02, "ppo.norm_adv": "batch"},
+    },
+    "E3_ALL": {
+        "env_tag": "mixed",
+        "seeds": E3_SEEDS,
+        "overrides": {},
+    },
 }
 
 #: E1_RBD6 finishes -> E1_RBD8 is submitted automatically. `PART_END` in the
@@ -242,6 +290,11 @@ CHAIN_NEXT = {
     "E2_UNLOCKPICKUP": None,
     "E2_RBD6": None,
     "E2_ALL": None,
+    "E3_TAXI": None,
+    "E3_DK6": None,
+    "E3_UNLOCKPICKUP": None,
+    "E3_RBD6": None,
+    "E3_ALL": None,
 }
 
 #: Stages with no parallel work at all (none in E1).
@@ -273,10 +326,10 @@ LEDGER = {s: ART / "tables" / f"{art_key(s)}.csv" for s in STAGES}
 
 #: The columns that uniquely identify one unit of work. `pending()` uses these
 #: to decide what is already done -- no more (or resumption misses work) and no
-#: fewer (or it redoes work). `stage` is implicit except in E2_ALL, whose one
-#: ledger pools four environment stages and three beta settings.
+#: fewer (or it redoes work). `stage` is implicit except in pooled manifests.
 KEYS = {s: ["group", "seed"] for s in STAGES}
 KEYS["E2_ALL"] = ["stage", "group", "seed", "beta"]
+KEYS["E3_ALL"] = ["stage", "group", "seed", "beta"]
 
 
 def beta_slug(beta: float) -> str:
@@ -308,6 +361,11 @@ def run_list(stage: str, groups: list[str]) -> list[dict]:
         return [{"stage": env_stage, "group": group, "seed": seed, "beta": beta}
                 for seed in SEEDS for env_stage in env_stages for beta in E2_BETAS
                 for group in groups]
+    if stage == "E3_ALL":
+        # Four E2 environments x three seeds x three selectors at fixed beta.
+        env_stages = ("E3_TAXI", "E3_DK6", "E3_UNLOCKPICKUP", "E3_RBD6")
+        return [{"stage": env_stage, "group": group, "seed": seed, "beta": E3_BETA}
+                for seed in E3_SEEDS for env_stage in env_stages for group in groups]
     seeds = STAGES[stage]["seeds"]
     return [{"stage": stage, "group": g, "seed": s} for g in groups for s in seeds]
 
@@ -324,8 +382,8 @@ def build_config(stage: str, group: str, seed: int, beta: float | None = None):
     """The exact ExperimentConfig one unit runs. Importable for a dry run."""
     from config import make_config
 
-    if stage == "E2_ALL":
-        raise ValueError("E2_ALL is a pooled manifest, not an executable environment stage")
+    if stage in ("E2_ALL", "E3_ALL"):
+        raise ValueError(f"{stage} is a pooled manifest, not an executable environment stage")
     spec = STAGES[stage]
     over = dict(spec["overrides"])
     over["ppo.pg_mode"] = ARM_PG_MODE[group]
@@ -334,6 +392,14 @@ def build_config(stage: str, group: str, seed: int, beta: float | None = None):
         if beta not in E2_BETAS:
             raise ValueError(f"E2 beta must be one of {E2_BETAS}, got {beta}")
         over["distill.beta"] = beta
+    if stage.startswith("E3_"):
+        beta = E3_BETA if beta is None else float(beta)
+        if beta != E3_BETA:
+            raise ValueError(f"E3 beta is fixed at {E3_BETA:g}, got {beta}")
+        if group not in E3_QUERY_STRATEGY:
+            raise ValueError(f"E3 group must be one of {sorted(E3_QUERY_STRATEGY)}, got {group!r}")
+        over["distill.beta"] = beta
+        over["distill.query_strategy"] = E3_QUERY_STRATEGY[group]
     over["run.run_name"] = run_name(stage, group, beta)
     over["run.seeds"] = (int(seed),)
     over["run.record_trajectories"] = RECORD_TRAJECTORIES
@@ -369,17 +435,17 @@ def execute(task: dict) -> dict:
     beta = task.get("beta")
     cfg = build_config(stage, group, seed, beta=beta)
 
-    # W&B, if enabled, is grouped by environment stage so the two E2 arms sit
+    # W&B, if enabled, is grouped by environment stage so comparable arms sit
     # in one comparison. The launcher selects online/offline mode; telemetry
     # never controls whether a training unit succeeds.
     os.environ.setdefault("PPO_CF_WANDB_PROJECT", "ppo-cf")
     algo_tag = ALGO_TAG.get(group, group)
     beta_tag = f"beta-{cfg.distill.beta:g}"
-    os.environ["PPO_CF_WANDB_GROUP"] = (
-        f"{stage}_{beta_tag}" if group in ("queried", "distill") else stage
-    )
+    beta_group = group in ("queried", "distill", "uniform", "uncertainty", "active")
+    os.environ["PPO_CF_WANDB_GROUP"] = f"{stage}_{beta_tag}" if beta_group else stage
     os.environ["PPO_CF_WANDB_JOB_TYPE"] = algo_tag
-    os.environ["PPO_CF_WANDB_TAGS"] = f"{env_tag(stage)},{algo_tag},{beta_tag}"
+    query_tag = f",query-{cfg.distill.query_strategy}" if group in E3_QUERY_STRATEGY else ""
+    os.environ["PPO_CF_WANDB_TAGS"] = f"{env_tag(stage)},{algo_tag},{beta_tag}{query_tag}"
 
     print(cfg.summary(), flush=True)
     t0 = time.time()
@@ -393,7 +459,8 @@ def execute(task: dict) -> dict:
         "env_tag": env_tag(stage),
         "algo_tag": algo_tag,
         "seed": seed,
-        "beta": cfg.distill.beta if group in ("queried", "distill") else float("nan"),
+        "beta": cfg.distill.beta if beta_group else float("nan"),
+        "query_strategy": cfg.distill.query_strategy if group in E3_QUERY_STRATEGY else "",
         "run_name": cfg.run.run_name,
         "env_id": cfg.env.env_id,
         "config_source": cfg.source,
@@ -403,7 +470,7 @@ def execute(task: dict) -> dict:
         "cf_horizon": cfg.ppo.cf_horizon,
         "cf_subsample": cfg.ppo.cf_subsample,
         "cf_branch_budget": cfg.ppo.cf_horizon * cfg.ppo.cf_rollouts * cfg.ppo.cf_subsample,
-        "perturb_beta": cfg.distill.beta if group in ("queried", "distill") else float("nan"),
+        "perturb_beta": cfg.distill.beta if beta_group else float("nan"),
         "total_timesteps": cfg.ppo.total_timesteps,
         "wall_time_s": round(wall, 1),
         "n_episodes": art["n_episodes"],

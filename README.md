@@ -105,3 +105,29 @@ unqueried states:
 ```text
 distill > queried
 ```
+
+### E3: uncertainty-driven distillation
+
+E3 keeps the E2 distilled perturbation setup but changes which states receive
+the 2% CF-label budget. It runs Taxi, DoorKey-6x6, UnlockPickup, and
+RedBlueDoors-6x6 for three paired seeds (`0`, `1`, `2`) with beta fixed at
+`0.75`:
+
+```text
+uniform      uniform label selection
+uncertainty top ensemble-uncertainty states
+active      top uncertainty-times-leverage states
+```
+
+Launch the cluster sweep with:
+
+```bash
+./submit_e3.sh
+```
+
+For a local sanity run, use `notebooks/04_e3_uncertainty_distillation.ipynb`.
+The pooled `E3_ALL` manifest contains 36 runs. The primary comparison is:
+
+```text
+active > uniform
+```

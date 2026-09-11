@@ -126,6 +126,69 @@ When complete, the pooled ledger is `artifacts/tables/E2_ALL.csv`; use its
 The paired E2 result is `distill` versus `queried` within each environment,
 seed, and beta. No `wandb sync` is needed because these E2 runs are online.
 
+## E3: uncertainty-driven state selection
+
+E3 uses the same four environments and 2% CF-label budget as E2, but it runs
+three seeds and fixes beta at `0.75`. All three arms use
+`ppo.pg_mode=landscape_distill`; only `distill.query_strategy` changes.
+
+| E3 arm | `distill.query_strategy` | queried states |
+|---|---|---|
+| `uniform` | `uniform` | uniform 2% distilled-control labels |
+| `uncertainty` | `uncertainty` | top 2% by ensemble epistemic uncertainty |
+| `active` | `uncertainty_leverage` | top 2% by uncertainty times policy leverage |
+
+The pooled sweep is **36 training runs total**:
+
+| environment | stage inside the pooled ledger | units |
+|---|---|---:|
+| Taxi | `E3_TAXI` | 9 |
+| DoorKey 6x6 | `E3_DK6` | 9 |
+| UnlockPickup | `E3_UNLOCKPICKUP` | 9 |
+| RedBlueDoors 6x6 | `E3_RBD6` | 9 |
+
+Prepare the cluster copy the same way as E2, then make the E3 launcher
+executable too:
+
+```bash
+bash slurm/fix_line_endings.sh
+chmod +x submit_e2.sh submit_e3.sh slurm/*.sh slurm/*.sbatch
+```
+
+Verify before launching:
+
+```bash
+sbatch slurm/00_verify.sbatch
+cat logs/verify_<jobid>.out
+```
+
+Submit E3:
+
+```bash
+cd ~/ppo_cf
+./submit_e3.sh
+```
+
+This uses 12 chunks by default and runs at most 12 workers concurrently. To use
+a different chunk count:
+
+```bash
+./submit_e3.sh 8
+```
+
+The manifest receipt must report:
+
+```text
+[E3_ALL] 3 groups: uniform, uncertainty, active
+[E3_ALL] 36 units pending
+```
+
+E3 W&B runs use namespace `e3_active_query_v1`, carry the fixed `beta-0.75`
+tag, and include a `query-<strategy>` tag. The ledger is
+`artifacts/tables/E3_ALL.csv`; the primary paired result is `active` versus
+`uniform` within each environment and seed, with `uncertainty` as the
+uncertainty-only ablation.
+
 This runbook is for launching Experiment 1 on the Slurm cluster. The entry point
 is:
 

@@ -146,7 +146,11 @@ def summarise(stage: str, groups: list[str]) -> dict:
 
     # ---- Predeclared pairings --------------------------------------------- #
     gates: dict[str, dict] = {}
-    if {"distill", "queried"}.issubset(groups):
+    if {"active", "uniform"}.issubset(groups):
+        comparisons = [("active", "uniform")]
+        if "uncertainty" in groups:
+            comparisons.extend([("uncertainty", "uniform"), ("active", "uncertainty")])
+    elif {"distill", "queried"}.issubset(groups):
         comparisons = [("distill", "queried")]
     else:
         comparisons = [("cf", other) for other in ("gae", "shuf")]

@@ -31,17 +31,26 @@ def main() -> int:
     from agents.ppo import PPOTrainer
 
     n_envs, n_steps = 4, 64                       # batch 256, divisible by 8 minibatches
-    cfg = make_config(a.env, **{
+    overrides = {
         "env.n_envs": n_envs,
         "ppo.n_steps": n_steps,
         "ppo.total_timesteps": n_envs * n_steps * a.steps,
         "ppo.pg_mode": a.pg_mode,
+        "ppo.cf_subsample": 0.02,
         "run.run_name": "_smoke",
         "run.seeds": (0,),
         "run.record_trajectories": False,
         "run.log_every_updates": 1,
         "run.checkpoint_fractions": (1.0,),
-    })
+    }
+    if a.pg_mode == "landscape_distill":
+        # Make the two-update verify actually exercise an all-state student
+        # payload rather than spending the whole smoke run in E2's real 1,024
+        # label warm-up.
+        overrides.update({"distill.min_labels_before_use": 4,
+                          "distill.beta_ramp_updates": 0,
+                          "distill.train_steps_per_rollout": 1})
+    cfg = make_config(a.env, **overrides)
     print(cfg.summary(), flush=True)
 
     trainer = PPOTrainer(cfg, seed=0, progress=True)
@@ -58,12 +67,18 @@ def main() -> int:
             print(f"FAILED: {k} is not finite ({v})", file=sys.stderr)
             return 1
         print(f"  {k:12s} {v:+.6f}")
-    if a.pg_mode.startswith("cf"):
+    if a.pg_mode.startswith("cf") or a.pg_mode == "landscape_distill":
         cf = {k: v for k, v in last.items() if k.startswith("cf_")}
         print(f"  cf diagnostics: {cf}")
         if not cf:
             print("FAILED: cf arm produced no cf_* diagnostics", file=sys.stderr)
             return 1
+    if a.pg_mode in ("cf_queried_perturb", "landscape_distill"):
+        payload = float(last.get("perturb_payload_rms", float("nan")))
+        if not math.isfinite(payload):
+            print(f"FAILED: E2 perturbation payload is not finite ({payload})", file=sys.stderr)
+            return 1
+        print(f"  perturb rms   {payload:+.6f}")
     print("smoke OK")
     return 0
 

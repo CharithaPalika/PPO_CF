@@ -67,3 +67,41 @@ diagnostic that justifies pulling it.
 - **`RUNBOOK.md`** — start here. Clone, build, verify, smoke, submit, collect
   results, troubleshoot. Written for someone setting this up from scratch.
 - **`slurm/README.md`** — why the pipeline is shaped the way it is; no commands.
+
+### E2: queried versus distilled CF-advantage perturbation
+
+E2 does **not** rerun PPO-GAE or direct all-action PPO-CF: E1 already answers
+that comparison. E2 uses the same uniform 2% CF-label budget in two paired
+perturbation arms:
+
+```text
+queried   inject exact A_CF(s, a_t) only at the queried 2% of states
+distill   train on those same labels, then inject predicted A_CF(s, a_t) at all states
+```
+
+The selected environments are Taxi, DoorKey-6x6, UnlockPickup, and
+RedBlueDoors-6x6: 4 environments × 5 paired seeds × 3 beta values
+(`0.25`, `0.75`, `1.5`) × 2 arms = 120 runs. Run a
+local experiment through `notebooks/03_e2_landscape_distillation.ipynb`, or on
+the cluster through:
+
+```bash
+./submit_e2.sh
+```
+
+This creates one globally interleaved `E2_ALL` manifest, not a sequential
+environment chain. Its 20 preassigned six-run chunks contain matched
+`(environment, seed, beta)` pairs; the array is throttled to 12 workers and
+starts queued chunks as slots free up. It preserves completed `(environment
+stage, arm, seed, beta)` rows and requeues only outstanding units. E2 sets W&B
+to `online`; beta is stored in W&B config, run group, and tags, and a retry
+attaches to the existing curve.
+See `RUNBOOK.md` for the upload, verification, and launch commands.
+
+E2 deliberately does not use uncertainty for gating or state selection. The
+only E2 question is whether uniform sparse CF labels can be amortised over
+unqueried states:
+
+```text
+distill > queried
+```

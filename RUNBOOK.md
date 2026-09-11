@@ -1,4 +1,130 @@
-# RUNBOOK - Experiment 1 Cluster Run
+# RUNBOOK - Cluster Runs
+
+## E2: queried vs distilled counterfactual-advantage perturbation
+
+E2 has **two** arms, not a new PPO/GAE comparison. E1 already provides the
+PPO-GAE and direct all-action PPO-CF evidence. E2 asks whether the same sparse
+counterfactual labels are more useful as a local perturbation or as supervision
+for an all-state student.
+
+| E2 arm | Exact CF labels | PPO advantage |
+|---|---:|---|
+| `queried` | Uniform 2% of rollout states | \(A_{GAE}+\beta A_{CF}(s,a_t)\) only on queried states |
+| `distill` | Same uniform 2% | \(A_{GAE}+\beta\hat A_{CF,\phi}(s,a_t)\) at every state |
+
+The pooled sweep contains four independent 30-run sets—five paired seeds, three
+fixed beta values, and two E2 arms each—for **120 training runs total**:
+
+| environment | stage inside the pooled ledger | units |
+|---|---|---:|
+| Taxi | `E2_TAXI` | 30 |
+| DoorKey 6x6 | `E2_DK6` | 30 |
+| UnlockPickup | `E2_UNLOCKPICKUP` | 30 |
+| RedBlueDoors 6x6 | `E2_RBD6` | 30 |
+
+The registered sweep is \(\beta\in\{0.25, 0.75, 1.5\}\). Beta zero is not
+repeated: it is the PPO-GAE baseline already measured in E1.
+
+`./submit_e2.sh` submits one globally interleaved `E2_ALL` manifest rather than
+four sequential stages. Its 20 array chunks each receive three matched two-arm
+`(environment, seed, beta)` pairs; queued chunks cycle through environments and
+beta values. Slurm runs at most **12 concurrent workers** and starts queued
+chunks as slots free up. This avoids waiting for an entire environment set to
+finish.
+
+### Upload the updated repository
+
+From the local repository directory, first make the destination once if needed,
+then copy the repository contents using this jump-host command:
+
+```bash
+ssh -J aniket@stujump.comp.nus.edu.sg aniket@xlogin.comp.nus.edu.sg 'mkdir -p ~/ppo_cf'
+scp -J aniket@stujump.comp.nus.edu.sg -r ./* aniket@xlogin.comp.nus.edu.sg:~/ppo_cf/
+```
+
+Then connect and prepare the copied scripts:
+
+```bash
+ssh -J aniket@stujump.comp.nus.edu.sg aniket@xlogin.comp.nus.edu.sg
+cd ~/ppo_cf
+bash slurm/fix_line_endings.sh
+chmod +x submit_e2.sh slurm/*.sh slurm/*.sbatch
+```
+
+### Build, authenticate, and verify
+
+Do not train on `xlogin`. Create the project virtual environment on a compute
+node, authenticate W&B once, and verify both new E2 modes:
+
+```bash
+mkdir -p logs
+sbatch slurm/00_create_venv.sbatch
+cat logs/venv_<jobid>.out
+
+source .venv/bin/activate
+wandb login
+deactivate
+
+sbatch slurm/00_verify.sbatch
+cat logs/verify_<jobid>.out
+```
+
+The verification log must end with `verify OK` before the real submission.
+
+### Submit E2
+
+```bash
+cd ~/ppo_cf
+./submit_e2.sh
+```
+
+This uses 20 chunks by default (six preassigned runs / three matched pairs per
+chunk), submitted as a single array throttled to 12 runners. To use a smaller
+array while preserving the same 120-run manifest, pass a chunk count:
+
+```bash
+./submit_e2.sh 12
+```
+
+Check the initial manifest receipt before leaving:
+
+```bash
+cat logs/manifest_<jobid>.out
+```
+
+It must report exactly:
+
+```text
+[E2_ALL] 2 groups: queried, distill
+[E2_ALL] 120 units pending
+```
+
+E2 forces W&B **online**. Each run has `distill.beta` in its W&B config, a
+`beta-<value>` tag, and an environment/beta W&B group (for example,
+`E2_TAXI_beta-0.75`). Retries of the same `(environment, arm, seed, beta)` use
+a stable W&B run ID, while the persistent `E2_ALL` ledger makes completed units
+skip automatically on requeue or resubmission.
+
+If you deliberately delete an E2 run in W&B, do **not** reuse its run-ID
+namespace: W&B reserves deleted IDs permanently. Before the next fresh sweep,
+change `PPO_CF_WANDB_RUN_NAMESPACE` in `submit_e2.sh` (for example, from
+`e2_beta_sweep_v2` to `e2_beta_sweep_v3`). Keep it unchanged while a sweep is
+active so interrupted units still resume their own W&B curves.
+
+### Monitor and collect E2
+
+```bash
+squeue -u $USER
+tail -f logs/run_<arrayjob>_0.out
+grep -l Traceback logs/run_*_*.err | head
+wc -l artifacts/chunks/E2_ALL_chunk_*.jsonl
+cat artifacts/status/E2_ALL.json
+```
+
+When complete, the pooled ledger is `artifacts/tables/E2_ALL.csv`; use its
+`stage` and `beta` columns to separate the twelve environment/beta conditions.
+The paired E2 result is `distill` versus `queried` within each environment,
+seed, and beta. No `wandb sync` is needed because these E2 runs are online.
 
 This runbook is for launching Experiment 1 on the Slurm cluster. The entry point
 is:

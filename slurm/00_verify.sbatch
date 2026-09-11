@@ -63,7 +63,10 @@ python - <<'PY'
 import sys
 from pipeline.stages import STAGES, GROUPS_ALL, build_config
 for stage in STAGES:
-    for group in GROUPS_ALL:
+    if stage == "E2_ALL":
+        continue  # pooled manifest; its units are the four concrete E2 stages
+    groups = ("queried", "distill") if stage.startswith("E2_") else GROUPS_ALL
+    for group in groups:
         cfg = build_config(stage, group, 0)
         print(f"  {stage:10s} {group:5s} {cfg.env.env_id:32s} "
               f"pg={cfg.ppo.pg_mode:14s} H={cfg.ppo.cf_horizon} "
@@ -105,10 +108,12 @@ for env_id in ("MiniGrid-RedBlueDoors-6x6-v0", "MiniGrid-RedBlueDoors-8x8-v0"):
     print(f"  {env_id}: restore exact over {n} transitions")
 RESTORE
 echo
-echo "--- 4. one real PPO-CF update, end to end ---"
+echo "--- 4. real E2 perturbation updates, end to end ---"
 # An import check passes on a machine where the first backward pass segfaults.
-python -m pipeline.smoke --steps 2 --pg_mode cf_all_action
+python -m pipeline.smoke --steps 2 --pg_mode cf_queried_perturb
+rm -rf runs/_smoke || true
+python -m pipeline.smoke --steps 2 --pg_mode landscape_distill
 rm -rf runs/_smoke || true
 
 echo
-echo "verify OK -- safe to submit ./experiment_1_6_envs"
+echo "verify OK -- safe to submit ./submit_e2.sh"

@@ -111,8 +111,10 @@ class PPOTrainer:
 
         # --- PPO-CF: the counterfactual oracle, evaluated every rollout ----- #
         self.oracle = None
+        self.landscape = None
+        self._distill_start_update: int | None = None
         self._cf_validated = True
-        if cfg.ppo.pg_mode.startswith("cf"):
+        if cfg.ppo.pg_mode.startswith("cf") or cfg.ppo.pg_mode == "landscape_distill":
             from oracle.online import OnlineOracle
             self.oracle = OnlineOracle(
                 cfg.env.env_id, self.pool.n_actions, cfg.ppo.gamma,
@@ -121,6 +123,22 @@ class PPOTrainer:
             )
             self._cf_validated = not cfg.ppo.cf_validate
             self._cf_rng = np.random.default_rng(seed + 7919)
+        if cfg.ppo.pg_mode == "landscape_distill":
+            from agents.landscape import LandscapeEnsemble, LandscapeReplay
+            self.landscape_replay = LandscapeReplay(cfg.distill.replay_capacity)
+            self.landscape = LandscapeEnsemble(
+                obs_dim=self.input_dim,
+                n_actions=self.pool.n_actions,
+                hidden_sizes=cfg.distill.hidden_sizes,
+                activation=cfg.ppo.activation,
+                encoder=cfg.ppo.encoder,
+                obs_shape=(tuple(self.pool.single_observation_space.shape)
+                           if cfg.ppo.encoder == "cnn" else None),
+                n_members=cfg.distill.ensemble_size,
+                learning_rate=cfg.distill.learning_rate,
+                device=cfg.ppo.device,
+                seed=seed,
+            )
         # The oracle restores simulator states, so they must be captured even
         # when no trajectory dataset is being written.
         self._needs_sim_state = self.recorder is not None or self.oracle is not None
@@ -267,6 +285,88 @@ class PPOTrainer:
         diag["n_cf_states"] = n_sub
         return q, mask, diag
 
+    # ---------------------------------------------------- E2 distillation #
+
+    def _distill_beta(self, update: int) -> float:
+        """A deterministic warm-up, deliberately not an uncertainty gate."""
+        assert self.landscape is not None
+        cfg = self.cfg.distill
+        if self.landscape_replay.size < cfg.min_labels_before_use:
+            return 0.0
+        if self._distill_start_update is None:
+            self._distill_start_update = int(update)
+        if cfg.beta_ramp_updates <= 0:
+            return float(cfg.beta)
+        frac = min(1.0, (update - self._distill_start_update + 1) / cfg.beta_ramp_updates)
+        return float(cfg.beta * frac)
+
+    def predict_distilled_landscape(self, update: int) -> tuple[np.ndarray, float]:
+        """Detached student landscape for the *current* rollout.
+
+        This runs before the current rollout's labels are added to replay.  The
+        resulting prediction can therefore only use information from earlier
+        rollouts, which makes E2 a genuine unqueried-state amortisation test.
+        """
+        assert self.landscape is not None
+        T, N = self.cfg.ppo.n_steps, self.cfg.env.n_envs
+        B = T * N
+        obs = self.buffer.obs[:T].reshape(B, -1)
+        pi = self.buffer.probs[:T].reshape(B, -1)
+        raw = self.landscape.predict(obs)
+        centred = raw - (pi * raw).sum(axis=1, keepdims=True)
+        return centred.astype(np.float32), self._distill_beta(update)
+
+    @staticmethod
+    def _policy_direction(v: np.ndarray, pi: np.ndarray) -> np.ndarray:
+        """C_pi v, the action-space direction PPO can actually use."""
+        centred = v - (pi * v).sum(axis=1, keepdims=True)
+        return pi * centred
+
+    def learn_distilled_landscape(
+        self, q_cf: np.ndarray, cf_mask: np.ndarray, prediction: np.ndarray
+    ) -> dict[str, float]:
+        """Audit fresh unseen labels, then add them and train for next rollout."""
+        assert self.landscape is not None
+        T, N = self.cfg.ppo.n_steps, self.cfg.env.n_envs
+        B = T * N
+        flat = lambda a: a[:T].reshape((B,) + a.shape[2:])
+        mask = np.asarray(cf_mask, dtype=bool)
+        obs = flat(self.buffer.obs)[mask]
+        pi = flat(self.buffer.probs)[mask]
+        q = np.asarray(q_cf, dtype=np.float32)[mask]
+        target = q - (pi * q).sum(axis=1, keepdims=True)
+        pred = np.asarray(prediction, dtype=np.float32)[mask]
+
+        target_centering = float(np.abs((pi * target).sum(axis=1)).max()) if len(target) else 0.0
+        pred_centering = float(np.abs((pi * pred).sum(axis=1)).max()) if len(pred) else 0.0
+        # These are evaluated BEFORE the fresh labels enter replay.
+        d_pred = self._policy_direction(pred, pi)
+        d_target = self._policy_direction(target, pi)
+        heldout_pg_error = float(np.linalg.norm(d_pred - d_target, axis=1).mean()) if len(target) else float("nan")
+        denom = np.linalg.norm(d_pred, axis=1) * np.linalg.norm(d_target, axis=1)
+        cosine = np.divide((d_pred * d_target).sum(axis=1), denom,
+                           out=np.zeros_like(denom), where=denom > 1e-12)
+        heldout_cos = float(cosine.mean()) if len(cosine) else float("nan")
+        best_agreement = float((pred.argmax(axis=1) == target.argmax(axis=1)).mean()) if len(target) else float("nan")
+
+        self.landscape_replay.add(obs, pi, target)
+        train = self.landscape.train(
+            self.landscape_replay,
+            steps=self.cfg.distill.train_steps_per_rollout,
+            batch_size=self.cfg.distill.train_batch_size,
+        )
+        return {
+            "distill_replay_size": float(self.landscape_replay.size),
+            "distill_total_labels": float(self.landscape_replay.total_added),
+            "distill_student_loss": train.loss,
+            "distill_student_steps": float(train.n_steps),
+            "distill_target_centering": target_centering,
+            "distill_prediction_centering": pred_centering,
+            "distill_heldout_pg_error": heldout_pg_error,
+            "distill_heldout_direction_cos": heldout_cos,
+            "distill_heldout_best_action_agreement": best_agreement,
+        }
+
     def _validate_oracle(self, q_cf: np.ndarray, mask: np.ndarray,
                          n_sample: int = 96) -> None:
         """Run once, on the first rollout. Cheap, and the failure it catches is
@@ -366,9 +466,13 @@ class PPOTrainer:
 
     def update(self, advantages: np.ndarray, returns: np.ndarray,
                q_cf: np.ndarray | None = None,
-               cf_mask: np.ndarray | None = None) -> dict[str, float]:
+               cf_mask: np.ndarray | None = None,
+               distill_landscape: np.ndarray | None = None,
+               perturb_beta: float = 0.0) -> dict[str, float]:
         cfg = self.cfg
-        cf = cfg.ppo.pg_mode.startswith("cf") and q_cf is not None
+        cf = cfg.ppo.pg_mode in ("cf_all_action", "cf_shuffled") and q_cf is not None
+        queried = cfg.ppo.pg_mode == "cf_queried_perturb" and q_cf is not None
+        distill = cfg.ppo.pg_mode == "landscape_distill" and distill_landscape is not None
         t = self.buffer.flat_tensors(advantages, returns, q_cf if cf else None)
         idx = np.arange(self.batch)
 
@@ -382,6 +486,46 @@ class PPOTrainer:
             t["advantages"], adv_std_raw = self._normalise(
                 t["advantages"], cfg.ppo.norm_adv_min_std
             )
+
+        # E2 injects a detached counterfactual landscape through the ordinary
+        # sampled-action PPO loss. `queried` uses the exact oracle landscape on
+        # its uniform 2% mask; `distill` uses the student prediction everywhere.
+        # Both use the SAME raw-GAE scale and are never independently whitened.
+        perturb_centering = perturb_mean_abs = perturb_payload_rms = float("nan")
+        perturb_scope_fraction = 0.0
+        distill_centering = distill_mean_abs = float("nan")
+        if queried:
+            b = torch.as_tensor(q_cf, dtype=torch.float32, device=self.device)
+            m = torch.as_tensor(cf_mask, dtype=torch.bool, device=self.device)
+            if b.shape != t["probs"].shape or m.shape != t["actions"].shape:
+                raise ValueError("queried CF labels do not match the rollout batch")
+            b = b - (t["probs"] * b).sum(-1, keepdim=True)
+            b = b * m[:, None]
+            with torch.no_grad():
+                perturb_centering = float((t["probs"][m] * b[m]).sum(-1).abs().max()) if bool(m.any()) else 0.0
+                perturb_mean_abs = float(b[m].abs().mean()) if bool(m.any()) else 0.0
+                perturb_scope_fraction = float(m.float().mean())
+            taken = b.gather(1, t["actions"][:, None]).squeeze(1)
+            payload = float(perturb_beta) * taken / max(adv_std_raw, cfg.ppo.norm_adv_min_std)
+            t["advantages"] = t["advantages"] + payload.detach()
+            with torch.no_grad():
+                perturb_payload_rms = float(payload.square().mean().sqrt())
+
+        if distill:
+            b = torch.as_tensor(distill_landscape, dtype=torch.float32, device=self.device)
+            if b.shape != t["probs"].shape:
+                raise ValueError(f"distill landscape has shape {tuple(b.shape)}, expected {tuple(t['probs'].shape)}")
+            with torch.no_grad():
+                distill_centering = float((t["probs"] * b).sum(-1).abs().max())
+                distill_mean_abs = float(b.abs().mean())
+                perturb_centering = distill_centering
+                perturb_mean_abs = distill_mean_abs
+                perturb_scope_fraction = 1.0
+            taken = b.gather(1, t["actions"][:, None]).squeeze(1)
+            payload = float(perturb_beta) * taken / max(adv_std_raw, cfg.ppo.norm_adv_min_std)
+            t["advantages"] = t["advantages"] + payload.detach()
+            with torch.no_grad():
+                perturb_payload_rms = float(payload.square().mean().sqrt())
 
         # --- counterfactual advantages, centred on the BEHAVIOUR policy ---- #
         # Eq (4): A_CF(s,a) = Q_g(s,a) - sum_b pi_old(b|s) Q_g(s,b), so that
@@ -563,6 +707,17 @@ class PPOTrainer:
             # killed the one-step version (measured 0.098).
             "cf_corr_gae": cf_corr_gae,
             "cf_frac_states": cf_frac,
+            # E2 only. The two arms differ solely in perturbation coverage:
+            # queried=2% exact teacher labels; distill=all-state student output.
+            # The absence of uncertainty here is intentional; E3 changes only
+            # the query selector.
+            "perturb_beta": float(perturb_beta) if (queried or distill) else float("nan"),
+            "perturb_scope_fraction": perturb_scope_fraction,
+            "perturb_centering": perturb_centering,
+            "perturb_mean_abs": perturb_mean_abs,
+            "perturb_payload_rms": perturb_payload_rms,
+            "distill_centering": distill_centering,
+            "distill_mean_abs": distill_mean_abs,
         }
 
     # ------------------------------------------------------------------- train #
@@ -731,14 +886,31 @@ class PPOTrainer:
 
             q_cf = cf_mask = None
             cf_diag = {}
+            distill_landscape = None
+            # The exact queried arm uses its teacher perturbation immediately.
+            # The student arm has its fixed label warm-up/ramp because it must
+            # learn from earlier rollouts before predicting this one.
+            perturb_beta = (float(cfg.distill.beta)
+                              if cfg.ppo.pg_mode == "cf_queried_perturb" else 0.0)
+            # Predict before querying/learning current labels.  This ordering
+            # is the E2 non-leakage contract.
+            if self.landscape is not None:
+                distill_landscape, perturb_beta = self.predict_distilled_landscape(update)
             if self.oracle is not None:
                 q_cf, cf_mask, cf_diag = self.compute_counterfactual()
                 if not self._cf_validated:
                     self._validate_oracle(q_cf, cf_mask)
                     self._cf_validated = True
 
-            stats = self.update(adv, ret, q_cf, cf_mask)
+            stats = self.update(
+                adv, ret, q_cf, cf_mask,
+                distill_landscape=distill_landscape,
+                perturb_beta=perturb_beta,
+            )
             stats.update({f"cf_{k}": float(v) for k, v in cf_diag.items()})
+            if self.landscape is not None:
+                assert q_cf is not None and cf_mask is not None and distill_landscape is not None
+                stats.update(self.learn_distilled_landscape(q_cf, cf_mask, distill_landscape))
             self._update_schedules(stats["entropy"], update)
             self._maybe_checkpoint()
 

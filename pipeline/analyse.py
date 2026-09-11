@@ -88,7 +88,16 @@ def _paired_diff(df, a: str, b: str, col: str, higher_is_better: bool) -> dict:
     """
     import numpy as np
 
-    wide = df.pivot_table(index="seed", columns="group", values=col, aggfunc="first")
+    # A pooled E2 ledger contains the same seeds for multiple environments and
+    # beta values; pair within each (environment, beta) condition rather than
+    # collapsing them into an arbitrary cross-condition mean.
+    if "beta" in df.columns and df["beta"].nunique() > 1:
+        index = ["env_tag", "beta", "seed"]
+    elif "env_tag" in df.columns and df["env_tag"].nunique() > 1:
+        index = ["env_tag", "seed"]
+    else:
+        index = "seed"
+    wide = df.pivot_table(index=index, columns="group", values=col, aggfunc="first")
     if a not in wide.columns or b not in wide.columns:
         return {"n_pairs": 0}
     pair = wide[[a, b]].dropna()
@@ -122,7 +131,11 @@ def summarise(stage: str, groups: list[str]) -> dict:
                         "first_success_step", "wall_time_s", "final_entropy",
                         "mean_cf_reward_coverage", "mean_cf_corr_gae")
             if c in df.columns]
-    per_arm = df.groupby("group")[cols].agg(["median", "mean", "std", "count"])
+    pooled_envs = "env_tag" in df.columns and df["env_tag"].nunique() > 1
+    beta_sweep = "beta" in df.columns and df["beta"].nunique() > 1
+    summary_groups = (["env_tag", "beta", "group"] if pooled_envs and beta_sweep else
+                      ["env_tag", "group"] if pooled_envs else "group")
+    per_arm = df.groupby(summary_groups)[cols].agg(["median", "mean", "std", "count"])
 
     tbl = ART / "tables" / f"{art_key(stage)}_summary.csv"
     tbl.parent.mkdir(parents=True, exist_ok=True)
@@ -131,24 +144,37 @@ def summarise(stage: str, groups: list[str]) -> dict:
     with pd.option_context("display.width", 200, "display.max_columns", 50):
         print(per_arm.to_string(), flush=True)
 
-    # ---- Eq (32): cf > gae AND cf > shuf ---------------------------------- #
+    # ---- Predeclared pairings --------------------------------------------- #
     gates: dict[str, dict] = {}
-    if "success_auc" in df.columns:
-        for other in ("gae", "shuf"):
-            if other in groups and "cf" in groups:
-                r = _paired_diff(df, "cf", other, "success_auc", higher_is_better=True)
-                r["insufficient"] = r["n_pairs"] < MIN_PAIRS
-                r["pass"] = (not r["insufficient"] and bool(r.get("better"))
-                             and r.get("ci_lo", 0.0) > 0.0)
-                gates[f"cf_beats_{other}_success_auc"] = r
-    if "frames_to_50" in df.columns:
-        for other in ("gae", "shuf"):
-            if other in groups and "cf" in groups:
-                r = _paired_diff(df, "cf", other, "frames_to_50", higher_is_better=False)
-                r["insufficient"] = r["n_pairs"] < MIN_PAIRS
-                r["pass"] = (not r["insufficient"] and bool(r.get("better"))
-                             and r.get("ci_hi", 0.0) < 0.0)
-                gates[f"cf_faster_than_{other}_to_50pct"] = r
+    if {"distill", "queried"}.issubset(groups):
+        comparisons = [("distill", "queried")]
+    else:
+        comparisons = [("cf", other) for other in ("gae", "shuf")]
+    if pooled_envs and beta_sweep:
+        gate_frames = [((str(env), float(beta)), sub)
+                       for (env, beta), sub in df.groupby(["env_tag", "beta"])]
+    elif pooled_envs:
+        gate_frames = [((str(tag), None), sub) for tag, sub in df.groupby("env_tag")]
+    else:
+        gate_frames = [(("", None), df)]
+    for (tag, beta), sub in gate_frames:
+        prefix = f"{tag}_beta_{beta:g}_" if beta is not None else f"{tag}_" if tag else ""
+        if "success_auc" in sub.columns:
+            for better, other in comparisons:
+                if other in groups and better in groups:
+                    r = _paired_diff(sub, better, other, "success_auc", higher_is_better=True)
+                    r["insufficient"] = r["n_pairs"] < MIN_PAIRS
+                    r["pass"] = (not r["insufficient"] and bool(r.get("better"))
+                                 and r.get("ci_lo", 0.0) > 0.0)
+                    gates[f"{prefix}{better}_beats_{other}_success_auc"] = r
+        if "frames_to_50" in sub.columns:
+            for better, other in comparisons:
+                if other in groups and better in groups:
+                    r = _paired_diff(sub, better, other, "frames_to_50", higher_is_better=False)
+                    r["insufficient"] = r["n_pairs"] < MIN_PAIRS
+                    r["pass"] = (not r["insufficient"] and bool(r.get("better"))
+                                 and r.get("ci_hi", 0.0) < 0.0)
+                    gates[f"{prefix}{better}_faster_than_{other}_to_50pct"] = r
 
     status = {
         "stage": stage,
@@ -163,7 +189,7 @@ def summarise(stage: str, groups: list[str]) -> dict:
     sp.parent.mkdir(parents=True, exist_ok=True)
     sp.write_text(json.dumps(status, indent=2))
 
-    print(f"\n[{stage}] Eq (32) checks (paired on seed, 95% bootstrap CI):", flush=True)
+    print(f"\n[{stage}] paired checks (95% bootstrap CI):", flush=True)
     for name, g in gates.items():
         if not g.get("n_pairs"):
             print(f"    {name:38s} no pairs", flush=True)
@@ -178,49 +204,66 @@ def summarise(stage: str, groups: list[str]) -> dict:
 
 
 def _figure(stage: str, df) -> None:
-    """Mean success curve per arm, from each unit's episodes.csv."""
+    """Mean success curve per arm, split by E2 environment and beta."""
     import matplotlib
     matplotlib.use("Agg")                      # compute nodes have no display
     import matplotlib.pyplot as plt
     import numpy as np
     import pandas as pd
 
-    fig, ax = plt.subplots(figsize=(7, 4.2))
-    grid = None
-    for group, sub in df.groupby("group"):
-        curves = []
-        for _, r in sub.iterrows():
-            ep_path = ROOT / str(r["out_dir"]) / "episodes.csv"
-            if not ep_path.exists():
+    def one(env_name: str, beta: float | None, subdf) -> None:
+        fig, ax = plt.subplots(figsize=(7, 4.2))
+        grid = None
+        for group, sub in subdf.groupby("group"):
+            curves = []
+            for _, r in sub.iterrows():
+                ep_path = ROOT / str(r["out_dir"]) / "episodes.csv"
+                if not ep_path.exists():
+                    continue
+                ep = pd.read_csv(ep_path).sort_values("global_step")
+                if not len(ep):
+                    continue
+                roll = ep["success"].astype(bool).astype(float).rolling(100, min_periods=1).mean()
+                if grid is None:
+                    grid = np.linspace(0, float(r.get("total_timesteps", ep["global_step"].max())), 400)
+                curves.append(np.interp(grid, ep["global_step"].to_numpy(float), roll.to_numpy()))
+            if not curves:
                 continue
-            ep = pd.read_csv(ep_path).sort_values("global_step")
-            if not len(ep):
-                continue
-            roll = ep["success"].astype(bool).astype(float).rolling(100, min_periods=1).mean()
-            if grid is None:
-                grid = np.linspace(0, float(r.get("total_timesteps", ep["global_step"].max())), 400)
-            curves.append(np.interp(grid, ep["global_step"].to_numpy(float), roll.to_numpy()))
-        if not curves:
-            continue
-        arr = np.vstack(curves)
-        m = arr.mean(0)
-        ax.plot(grid, m, label=f"{group} (n={len(curves)})")
-        if len(curves) > 1:
-            ax.fill_between(grid, np.percentile(arr, 25, axis=0),
-                            np.percentile(arr, 75, axis=0), alpha=0.15)
+            arr = np.vstack(curves)
+            m = arr.mean(0)
+            ax.plot(grid, m, label=f"{group} (n={len(curves)})")
+            if len(curves) > 1:
+                ax.fill_between(grid, np.percentile(arr, 25, axis=0),
+                                np.percentile(arr, 75, axis=0), alpha=0.15)
 
-    ax.set_xlabel("environment frames")
-    ax.set_ylabel("success rate (100-episode rolling mean)")
-    ax.set_title(f"{stage}: PPO vs PPO-CF")
-    ax.set_ylim(-0.02, 1.02)
-    ax.legend()
-    ax.grid(alpha=0.3)
-    fig.tight_layout()
-    out = ART / "figures" / f"{art_key(stage)}_success.png"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out, dpi=140)
-    plt.close(fig)
-    print(f"\n[{stage}] figure -> {out.relative_to(ROOT)}", flush=True)
+        ax.set_xlabel("environment frames")
+        ax.set_ylabel("success rate (100-episode rolling mean)")
+        title = f"{stage}: {env_name}" if env_name else stage
+        if beta is not None:
+            title += f", beta={beta:g}"
+        ax.set_title(title)
+        ax.set_ylim(-0.02, 1.02)
+        ax.legend()
+        ax.grid(alpha=0.3)
+        fig.tight_layout()
+        suffix = f"_{env_name}" if env_name else ""
+        if beta is not None:
+            suffix += f"_beta_{beta:g}"
+        out = ART / "figures" / f"{art_key(stage)}{suffix}_success.png"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out, dpi=140)
+        plt.close(fig)
+        print(f"\n[{stage}] figure -> {out.relative_to(ROOT)}", flush=True)
+
+    if ("env_tag" in df.columns and df["env_tag"].nunique() > 1
+            and "beta" in df.columns and df["beta"].nunique() > 1):
+        for (env_name, beta), subdf in df.groupby(["env_tag", "beta"]):
+            one(str(env_name), float(beta), subdf)
+    elif "env_tag" in df.columns and df["env_tag"].nunique() > 1:
+        for env_name, subdf in df.groupby("env_tag"):
+            one(str(env_name), None, subdf)
+    else:
+        one("", None, df)
 
 
 # --------------------------------------------------------------------------- #

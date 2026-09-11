@@ -293,6 +293,29 @@ class PPOConfig:
     device: str = "cpu"
 
 
+@dataclass(frozen=True)
+class DistillConfig:
+    """E2: uniform sparse CF labels, used locally or distilled globally.
+
+    There is deliberately no uncertainty threshold, confidence gate, novelty
+    count, or active query rule here.  E2 isolates amortisation: labels are
+    uniform. `beta` is the shared perturbation strength: the queried arm uses
+    the exact teacher only at queried states, while the student mean guides
+    every state in the distilled arm. E3 will reuse the ensemble's variance
+    only to decide which states receive future labels.
+    """
+
+    ensemble_size: int = 5
+    hidden_sizes: Sequence[int] = (64,)
+    replay_capacity: int = 4096
+    min_labels_before_use: int = 1024
+    train_steps_per_rollout: int = 2
+    train_batch_size: int = 256
+    learning_rate: float = 3e-4
+    beta: float = 0.25
+    beta_ramp_updates: int = 10
+
+
 # --------------------------------------------------------------------------- #
 # Run / experiment
 # --------------------------------------------------------------------------- #
@@ -362,6 +385,7 @@ class OracleConfig:
 class ExperimentConfig:
     env: EnvConfig = field(default_factory=EnvConfig)
     ppo: PPOConfig = field(default_factory=PPOConfig)
+    distill: DistillConfig = field(default_factory=DistillConfig)
     run: RunConfig = field(default_factory=RunConfig)
     reward: RewardConfig = field(default_factory=RewardConfig)
     oracle: OracleConfig = field(default_factory=OracleConfig)
@@ -404,7 +428,17 @@ class ExperimentConfig:
                f"Q_g horizon={self.ppo.cf_horizon} "
                f"x{self.ppo.cf_rollouts} rollouts, subsample={self.ppo.cf_subsample:.0%}, "
                f"restore={self.ppo.cf_restore}"
-               if self.ppo.pg_mode.startswith("cf") else ""),
+               if self.ppo.pg_mode in ("cf_all_action", "cf_shuffled") else
+               f"  queried Q_g horizon={self.ppo.cf_horizon} "
+               f"x{self.ppo.cf_rollouts} rollouts, subsample={self.ppo.cf_subsample:.0%}, "
+               f"restore={self.ppo.cf_restore}"
+               if self.ppo.pg_mode in ("cf_queried_perturb", "landscape_distill") else ""),
+            (f"E2 perturbation  scope={'queried 2%' if self.ppo.pg_mode == 'cf_queried_perturb' else 'student all-state'}, "
+             f"beta={self.distill.beta:g}"
+             if self.ppo.pg_mode in ("cf_queried_perturb", "landscape_distill") else ""),
+            (f"distillation      M={self.distill.ensemble_size}, labels before use="
+             f"{self.distill.min_labels_before_use}, beta={self.distill.beta:g}"
+             if self.ppo.pg_mode == "landscape_distill" else ""),
             f"reward shaping     {'on' if self.reward.active else 'off'}",
             f"warm start         {self.run.init_from or 'none'}",
             f"seeds              {list(self.run.seeds)}",
@@ -417,7 +451,7 @@ class ExperimentConfig:
 # YAML loading
 # --------------------------------------------------------------------------- #
 
-_SECTIONS = {"env": EnvConfig, "ppo": PPOConfig, "run": RunConfig,
+_SECTIONS = {"env": EnvConfig, "ppo": PPOConfig, "distill": DistillConfig, "run": RunConfig,
              "reward": RewardConfig, "oracle": OracleConfig}
 
 
@@ -523,22 +557,24 @@ def _validate(cfg: ExperimentConfig) -> None:
         raise ValueError(f"total_timesteps {cfg.ppo.total_timesteps} < one batch ({b})")
     if cfg.ppo.norm_adv not in ("minibatch", "batch", "none"):
         raise ValueError(f"norm_adv must be minibatch|batch|none, got {cfg.ppo.norm_adv!r}")
-    if cfg.ppo.pg_mode not in ("gae", "cf_all_action", "cf_shuffled"):
+    if cfg.ppo.pg_mode not in ("gae", "cf_all_action", "cf_shuffled", "cf_queried_perturb",
+                               "landscape_distill"):
         raise ValueError(
-            f"pg_mode must be gae|cf_all_action|cf_shuffled, got {cfg.ppo.pg_mode!r}")
+            "pg_mode must be gae|cf_all_action|cf_shuffled|cf_queried_perturb|"
+            f"landscape_distill, got {cfg.ppo.pg_mode!r}")
     if cfg.ppo.alpha_gae < 0.0 or cfg.ppo.alpha_cf < 0.0:
         raise ValueError(
             f"alpha_gae and alpha_cf must be >= 0, got "
             f"{cfg.ppo.alpha_gae} and {cfg.ppo.alpha_cf}")
-    if cfg.ppo.pg_mode.startswith("cf") and cfg.ppo.alpha_gae == 0.0 == cfg.ppo.alpha_cf:
+    if cfg.ppo.pg_mode in ("cf_all_action", "cf_shuffled") and cfg.ppo.alpha_gae == 0.0 == cfg.ppo.alpha_cf:
         raise ValueError("alpha_gae and alpha_cf are both 0 -- the actor would never update")
     if not 0.0 < cfg.ppo.cf_subsample <= 1.0:
         raise ValueError(f"cf_subsample must be in (0, 1], got {cfg.ppo.cf_subsample}")
     if cfg.ppo.cf_restore not in ("exact", "fast"):
         raise ValueError(f"cf_restore must be exact|fast, got {cfg.ppo.cf_restore!r}")
-    if cfg.ppo.pg_mode == "cf_all_action" and cfg.reward.active:
+    if cfg.ppo.pg_mode in ("cf_all_action", "cf_queried_perturb", "landscape_distill") and cfg.reward.active:
         raise ValueError(
-            "pg_mode='cf_all_action' with reward shaping on: the oracle would compute "
+            f"pg_mode={cfg.ppo.pg_mode!r} with reward shaping on: the oracle would compute "
             "Q_CF from the RAW environment reward while the critic was trained on the "
             "shaped one, so A_CF would mix two different reward functions."
         )
@@ -551,6 +587,18 @@ def _validate(cfg: ExperimentConfig) -> None:
         raise ValueError(f"layout_seed_mode must be cycle|random, got {cfg.env.layout_seed_mode!r}")
     if cfg.ppo.encoder == "cnn" and cfg.env.obs_norm != "image":
         raise ValueError("encoder='cnn' expects obs_norm='image'")
+    if cfg.distill.ensemble_size < 1:
+        raise ValueError("distill.ensemble_size must be at least 1")
+    if cfg.distill.replay_capacity < 1 or cfg.distill.train_batch_size < 1:
+        raise ValueError("distillation replay capacity and batch size must be positive")
+    if cfg.distill.min_labels_before_use < 0 or cfg.distill.min_labels_before_use > cfg.distill.replay_capacity:
+        raise ValueError("distill.min_labels_before_use must lie in [0, replay_capacity]")
+    if cfg.distill.beta < 0.0:
+        raise ValueError("distill.beta must be non-negative")
+    if cfg.ppo.pg_mode in ("cf_queried_perturb", "landscape_distill") and cfg.ppo.norm_adv == "minibatch":
+        raise ValueError(
+            f"{cfg.ppo.pg_mode} requires norm_adv='batch' or 'none': independently "
+            "re-whitening each minibatch would distort the perturbation scale")
 
 
 def config_from_json(path: Path) -> ExperimentConfig:

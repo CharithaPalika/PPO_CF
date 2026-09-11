@@ -53,6 +53,10 @@ ARM_PG_MODE = {
     "gae":  "gae",
     "cf":   "cf_all_action",
     "shuf": "cf_shuffled",
+    # E2: same uniform CF-label budget; inject the exact perturbation locally
+    # or a distilled prediction at every rollout state.
+    "queried": "cf_queried_perturb",
+    "distill": "landscape_distill",
 }
 GROUPS_ALL = ["gae", "cf", "shuf"]
 
@@ -60,6 +64,8 @@ ALGO_TAG = {
     "gae": "ppo",
     "cf": "ppo-cf",
     "shuf": "ppo-cf-shuffled",
+    "queried": "ppo-cf-queried-perturb",
+    "distill": "ppo-cf-distilled",
 }
 
 #: Trajectory datasets are 25 MB/seed and feed NB03+ (E2/E3 distillation), not
@@ -76,6 +82,10 @@ LOG_EVERY_UPDATES = 2
 
 #: Default paired seeds for cluster sweeps.
 SEEDS = list(range(5))
+
+#: E2 perturbation-strength sweep. Beta=0 is already represented by the PPO
+#: baseline in E1, so E2 evaluates three non-zero strengths only.
+E2_BETAS = (0.25, 0.75, 1.5)
 
 #: Frame override used only by the historical RedBlue E1 stages below. The new
 #: EXP1_* stages use their YAML budgets as the source of truth.
@@ -173,6 +183,45 @@ STAGES: dict[str, dict] = {
         "seeds": SEEDS,
         "overrides": {},
     },
+
+    # ---- E2: CF advantage perturbation, local vs amortised ---------------
+    # Both arms query exactly 2% of rollout states and use five paired seeds.
+    # `queried` injects the exact A_CF only at a queried state; `distill`
+    # trains on those labels and injects its prediction at every rollout state.
+    # E1 already contains the GAE and all-action-PPO-CF comparisons.
+    "E2_TAXI": {
+        "env_config": "taxi_cf",
+        "env_tag": "taxi",
+        "seeds": SEEDS,
+        "overrides": {"ppo.cf_subsample": 0.02, "ppo.norm_adv": "batch"},
+    },
+    "E2_DK6": {
+        "env_config": "doorkey6x6_cf",
+        "env_tag": "doorkey6x6",
+        "seeds": SEEDS,
+        "overrides": {"ppo.cf_subsample": 0.02, "ppo.norm_adv": "batch"},
+    },
+    "E2_UNLOCKPICKUP": {
+        "env_config": "unlockpickup_cf",
+        "env_tag": "unlockpickup",
+        "seeds": SEEDS,
+        "overrides": {"ppo.cf_subsample": 0.02, "ppo.norm_adv": "batch"},
+    },
+    "E2_RBD6": {
+        "env_config": "redbluedoors6x6_cf",
+        "env_tag": "redbluedoors6x6",
+        "seeds": SEEDS,
+        "overrides": {"ppo.cf_subsample": 0.02, "ppo.norm_adv": "batch"},
+    },
+    # One pooled submission expands to the four environment stages above:
+    # 4 environments x 5 seeds x 3 betas x 2 arms = 120 units. Its manifest is
+    # globally interleaved, avoiding a sequential environment chain and idle
+    # workers.
+    "E2_ALL": {
+        "env_tag": "mixed",
+        "seeds": SEEDS,
+        "overrides": {},
+    },
 }
 
 #: E1_RBD6 finishes -> E1_RBD8 is submitted automatically. `PART_END` in the
@@ -188,6 +237,11 @@ CHAIN_NEXT = {
     "EXP1_UNLOCKPICKUP": "EXP1_RBD6",
     "EXP1_RBD6": "EXP1_TAXI",
     "EXP1_TAXI": None,
+    "E2_TAXI": None,
+    "E2_DK6": None,
+    "E2_UNLOCKPICKUP": None,
+    "E2_RBD6": None,
+    "E2_ALL": None,
 }
 
 #: Stages with no parallel work at all (none in E1).
@@ -219,14 +273,22 @@ LEDGER = {s: ART / "tables" / f"{art_key(s)}.csv" for s in STAGES}
 
 #: The columns that uniquely identify one unit of work. `pending()` uses these
 #: to decide what is already done -- no more (or resumption misses work) and no
-#: fewer (or it redoes work). `stage` is implicit: one ledger per stage.
+#: fewer (or it redoes work). `stage` is implicit except in E2_ALL, whose one
+#: ledger pools four environment stages and three beta settings.
 KEYS = {s: ["group", "seed"] for s in STAGES}
+KEYS["E2_ALL"] = ["stage", "group", "seed", "beta"]
 
 
-def run_name(stage: str, group: str) -> str:
+def beta_slug(beta: float) -> str:
+    """Stable, filesystem/W&B-safe label for one fixed beta condition."""
+    return "b" + f"{float(beta):g}".replace("-", "m").replace(".", "p")
+
+
+def run_name(stage: str, group: str, beta: float | None = None) -> str:
     """runs/<run_name>/seed_<seed>/ -- e.g. runs/e1_rbd6_cf/seed_3/."""
     prefix = "_smoke/" if SMOKE_FRAMES else ""
-    return f"{prefix}{stage.lower()}_{group}"
+    beta_part = f"_{beta_slug(beta)}" if beta is not None else ""
+    return f"{prefix}{stage.lower()}_{group}{beta_part}"
 
 
 def env_tag(stage: str) -> str:
@@ -238,6 +300,14 @@ def run_list(stage: str, groups: list[str]) -> list[dict]:
     """Every unit this stage needs -- the FULL sweep. `pending()` subtracts."""
     if stage not in STAGES:
         raise KeyError(f"unknown stage {stage!r}; known: {sorted(STAGES)}")
+    if stage == "E2_ALL":
+        # This order, followed by `pipeline.manifest.interleave`, makes each
+        # preassigned pair one matched (environment, seed, beta) comparison
+        # while cycling environments and beta settings across queued chunks.
+        env_stages = ("E2_TAXI", "E2_DK6", "E2_UNLOCKPICKUP", "E2_RBD6")
+        return [{"stage": env_stage, "group": group, "seed": seed, "beta": beta}
+                for seed in SEEDS for env_stage in env_stages for beta in E2_BETAS
+                for group in groups]
     seeds = STAGES[stage]["seeds"]
     return [{"stage": stage, "group": g, "seed": s} for g in groups for s in seeds]
 
@@ -250,14 +320,21 @@ def stage_groups(stage: str, groups: list[str]) -> list[str]:
     return list(groups)
 
 
-def build_config(stage: str, group: str, seed: int):
+def build_config(stage: str, group: str, seed: int, beta: float | None = None):
     """The exact ExperimentConfig one unit runs. Importable for a dry run."""
     from config import make_config
 
+    if stage == "E2_ALL":
+        raise ValueError("E2_ALL is a pooled manifest, not an executable environment stage")
     spec = STAGES[stage]
     over = dict(spec["overrides"])
     over["ppo.pg_mode"] = ARM_PG_MODE[group]
-    over["run.run_name"] = run_name(stage, group)
+    if stage.startswith("E2_"):
+        beta = E2_BETAS[0] if beta is None else float(beta)
+        if beta not in E2_BETAS:
+            raise ValueError(f"E2 beta must be one of {E2_BETAS}, got {beta}")
+        over["distill.beta"] = beta
+    over["run.run_name"] = run_name(stage, group, beta)
     over["run.seeds"] = (int(seed),)
     over["run.record_trajectories"] = RECORD_TRAJECTORIES
     over["run.log_every_updates"] = LOG_EVERY_UPDATES
@@ -289,16 +366,20 @@ def execute(task: dict) -> dict:
 
     from scripts.train import run_seed
 
-    cfg = build_config(stage, group, seed)
+    beta = task.get("beta")
+    cfg = build_config(stage, group, seed, beta=beta)
 
-    # wandb, if enabled at all, is grouped by stage so the three arms sit in one
-    # comparison. utils/wandb_sink.py defaults it to offline; nothing here can
-    # fail the run.
+    # W&B, if enabled, is grouped by environment stage so the two E2 arms sit
+    # in one comparison. The launcher selects online/offline mode; telemetry
+    # never controls whether a training unit succeeds.
     os.environ.setdefault("PPO_CF_WANDB_PROJECT", "ppo-cf")
     algo_tag = ALGO_TAG.get(group, group)
-    os.environ["PPO_CF_WANDB_GROUP"] = stage
+    beta_tag = f"beta-{cfg.distill.beta:g}"
+    os.environ["PPO_CF_WANDB_GROUP"] = (
+        f"{stage}_{beta_tag}" if group in ("queried", "distill") else stage
+    )
     os.environ["PPO_CF_WANDB_JOB_TYPE"] = algo_tag
-    os.environ["PPO_CF_WANDB_TAGS"] = f"{env_tag(stage)},{algo_tag}"
+    os.environ["PPO_CF_WANDB_TAGS"] = f"{env_tag(stage)},{algo_tag},{beta_tag}"
 
     print(cfg.summary(), flush=True)
     t0 = time.time()
@@ -312,6 +393,7 @@ def execute(task: dict) -> dict:
         "env_tag": env_tag(stage),
         "algo_tag": algo_tag,
         "seed": seed,
+        "beta": cfg.distill.beta if group in ("queried", "distill") else float("nan"),
         "run_name": cfg.run.run_name,
         "env_id": cfg.env.env_id,
         "config_source": cfg.source,
@@ -321,6 +403,7 @@ def execute(task: dict) -> dict:
         "cf_horizon": cfg.ppo.cf_horizon,
         "cf_subsample": cfg.ppo.cf_subsample,
         "cf_branch_budget": cfg.ppo.cf_horizon * cfg.ppo.cf_rollouts * cfg.ppo.cf_subsample,
+        "perturb_beta": cfg.distill.beta if group in ("queried", "distill") else float("nan"),
         "total_timesteps": cfg.ppo.total_timesteps,
         "wall_time_s": round(wall, 1),
         "n_episodes": art["n_episodes"],
@@ -398,9 +481,9 @@ def unit_metrics(out_dir: Path, total_timesteps: int) -> dict:
                       "pg_loss", "v_loss", "sps"):
                 if c in sc.columns:
                     out[f"final_{c}"] = _f(last.get(c))
-            # Budget honesty + teacher quality: every cf_* diagnostic the
-            # trainer emitted, averaged over training and at the end.
-            for c in [c for c in sc.columns if c.startswith("cf_")]:
+            # Budget honesty + perturbation/student quality, averaged over
+            # training and at the end.
+            for c in [c for c in sc.columns if c.startswith(("cf_", "perturb_", "distill_"))]:
                 out[f"mean_{c}"] = _f(sc[c].mean())
                 out[f"final_{c}"] = _f(last.get(c))
     return out

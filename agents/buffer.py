@@ -121,18 +121,21 @@ class RolloutBuffer:
             "obs": f(self.obs, torch.float32),
             "actions": f(self.actions, torch.int64),
             "logprobs": f(self.logprobs, torch.float32),
+            # E2's queried and distilled perturbations both centre an
+            # action-value landscape under the behaviour policy. Keep these
+            # available even when the old all-action PPO-CF loss is not active.
+            "probs": f(self.probs, torch.float32),
             "values": f(self.values, torch.float32),
             "advantages": f(advantages, torch.float32),
             "returns": f(returns, torch.float32),
         }
         if q_cf is not None:
-            # PPO-CF needs the all-action counterfactual values AND the
-            # behaviour policy that centred them. Both are per-(state, action).
+            # PPO-CF needs the all-action counterfactual values. `probs` is
+            # already exported above because E2 needs it as well.
             # q_cf arrives ALREADY FLAT as (n_steps*n_envs, K) -- it is computed
             # on a subsample of the flattened rollout -- so it must not go
             # through `f`, which would collapse its action axis.
             out["q_cf"] = torch.as_tensor(q_cf, dtype=torch.float32, device=d)
-            out["probs"] = f(self.probs, torch.float32)
         return out
 
 

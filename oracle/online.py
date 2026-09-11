@@ -212,6 +212,7 @@ class OnlineOracle:
         total = np.zeros(len(items))
         terminated_in_h = np.zeros(len(items), dtype=bool)
         got_reward = np.zeros(len(items), dtype=bool)
+        branch_transitions = 0
 
         for start in range(0, len(items), chunk):
             block = items[start : start + chunk]
@@ -227,6 +228,7 @@ class OnlineOracle:
             for j, (i, a, _m) in enumerate(block):
                 self._restore_into(envs[j], sim_states[i])
                 o, r, term, trunc, _ = envs[j].step(a)
+                branch_transitions += 1
                 obs[j] = np.asarray(o, dtype=np.float32).ravel()
                 acc[j] = r
                 got_reward[start + j] = r != 0.0
@@ -245,6 +247,7 @@ class OnlineOracle:
                 a_t = (np.cumsum(p, axis=1) < u[:, None]).sum(axis=1).clip(0, K - 1)
                 for n, j in enumerate(idx):
                     o, r, term, trunc, _ = envs[j].step(int(a_t[n]))
+                    branch_transitions += 1
                     obs[j] = np.asarray(o, dtype=np.float32).ravel()
                     acc[j] += disc[j] * r
                     if r != 0.0:
@@ -270,6 +273,9 @@ class OnlineOracle:
             "terminated_within_horizon": float(terminated_in_h.mean()),
             "frac_states_any_reward": float(
                 got_reward.reshape(M, K, R).any(axis=(1, 2)).mean()),
+            # Budget honesty: terminal branches cost fewer than H steps, so
+            # this observed count, not K*R*H, is the authoritative total.
+            "branch_transitions": float(branch_transitions),
         }
         return q, diag
 
@@ -306,7 +312,11 @@ def check_replay(oracle: OnlineOracle, sim_states: np.ndarray, actions: np.ndarr
     for i in range(n):
         oracle._restore(sim_states[i])
         _o, r, _t, _tr, _ = oracle.env.step(int(actions[i]))
-        r_err[i] = abs(float(r) - float(rewards[i]))
+        # Rollout rewards are stored and consumed as float32.  Comparing the
+        # raw Python reward against that stored representation falsely rejects
+        # a bit-exact restore whenever a MiniGrid success reward rounds by one
+        # float32 ulp (observed on Unlock CF seed 2).
+        r_err[i] = abs(float(np.float32(r)) - float(np.float32(rewards[i])))
         s_err[i] = np.abs(get_sim_state(oracle.env) - next_sim_states[i]).max()
     return {
         "n": n,

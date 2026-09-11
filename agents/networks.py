@@ -252,3 +252,41 @@ class ActorCritic(nn.Module):
         return cls(d["obs_dim"], d["n_actions"], d["hidden_sizes"], d["activation"],
                    d.get("prob_floor", 0.0), d.get("encoder", "mlp"), d.get("obs_shape"),
                    d.get("share_encoder", False))
+
+
+class LandscapeNet(nn.Module):
+    """Observation -> all-action counterfactual landscape predictor.
+
+    This network is deliberately separate from :class:`ActorCritic`.  Its
+    predictions are detached before they enter PPO, so actor and critic losses
+    can never train the landscape student by accident.
+    """
+
+    def __init__(
+        self,
+        obs_dim: int,
+        n_actions: int,
+        hidden_sizes: Sequence[int],
+        activation: str = "tanh",
+        encoder: str = "mlp",
+        obs_shape: Sequence[int] | None = None,
+    ):
+        super().__init__()
+        self.encoder_kind = encoder
+        if encoder == "cnn":
+            if obs_shape is None:
+                raise ValueError("encoder='cnn' requires obs_shape=(H, W, C)")
+            self.encoder = MiniGridCNN(obs_shape)
+            embedding = self.encoder.out_dim
+        elif encoder == "mlp":
+            self.encoder = None
+            embedding = int(obs_dim)
+        else:
+            raise ValueError(f"unknown landscape encoder {encoder!r}")
+        # A small final-layer scale keeps initial student guidance near zero.
+        self.head = _mlp(embedding, hidden_sizes, n_actions, activation, out_std=0.01)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.encoder is not None:
+            x = self.encoder(x)
+        return self.head(x)

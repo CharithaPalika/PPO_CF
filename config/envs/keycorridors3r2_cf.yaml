@@ -1,0 +1,86 @@
+# PPO-CF experiment on MiniGrid-KeyCorridorS3R2-v0.
+#
+# ONE config drives the comparison arms. The notebook overrides only
+# `ppo.pg_mode` (gae / cf_all_action / cf_shuffled), so every other
+# hyperparameter is identical by construction.
+#
+# The PPO base is the RL Zoo KeyCorridorS3R1 recipe scaled to the harder S3R2
+# layout. The working local recipe fixes one layout, keeps a small action
+# floor/entropy guard, and uses a denser CF state sample than the first draft.
+
+env:
+  env_id: MiniGrid-KeyCorridorS3R2-v0
+  n_envs: 8
+  max_episode_steps: null
+  obs_norm: image
+  fully_observable: true
+  success_on: terminated
+  layout_seeds: [0]
+  layout_seed_mode: cycle
+
+ppo:
+  total_timesteps: 500000
+  n_steps: 128
+  n_epochs: 10
+  n_minibatches: 16
+  learning_rate: 0.00025
+  anneal_lr: false
+  optim_eps: 1.0e-8
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_coef: 0.2
+  clip_vloss: true
+  ent_coef: 0.03
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: null
+
+  norm_adv: batch
+  norm_adv_min_std: 1.0e-06
+
+  pg_mode: cf_all_action
+  cf_restore: fast
+  cf_validate: true
+  alpha_gae: 1.0
+  alpha_cf: 0.5
+  cf_horizon: 64
+  cf_rollouts: 2
+  cf_subsample: 0.10
+  cf_bootstrap_tail: true
+  cf_branch_envs: 256
+
+  ent_mode: fixed
+  prob_floor_start: 0.15
+  prob_floor_end: 0.02
+
+  encoder: cnn
+  share_encoder: true
+  hidden_sizes: [64]
+  activation: tanh
+  separate_grad_clip: false
+  device: cpu
+
+run:
+  run_name: keycorridors3r2
+  seeds: [0]
+  trajectory_stride: 4
+  compact_trajectory_dtypes: true
+  log_every_updates: 10
+  record_trajectories: true
+  eval_every_updates: 0
+  eval_episodes: 20
+  init_from: null
+
+reward:
+  potential_shaping: false
+  potential_key: 0.0
+  potential_door: 0.0
+  count_bonus_coef: 0.0
+
+oracle:
+  checkpoint_fraction: 0.75
+
+note: |
+  Working local CF recipe: fixed layout seed 0, H=64, alpha_cf=0.5,
+  cf_subsample=0.10. Watch pickup (3), toggle (5), drop (4), and
+  `cf_reward_coverage`.

@@ -1,0 +1,66 @@
+# Editable cluster experiment matrix.
+#
+# This file is intentionally high-level. Pick the environments, algorithms, and
+# seeds here; the Slurm setup code can translate these names into config
+# overrides later.
+
+schema_version: 1
+name: all_experiment_config
+
+defaults:
+  beta: 0.75
+  record_trajectories: false
+  log_every_updates: 2
+
+environments:
+  redbluedoors6x6:
+    label: RedBlueDoors 6x6
+    config_path: config/envs/redbluedoors6x6_cf.yaml
+    seeds: [0, 1, 2, 3, 4]
+    algos:
+      - ppo
+      - ppo-cf
+      - queried-perturb
+      - distilled-beta
+      - uncertainty-distilled
+      - active-distilled
+
+  keycorridors3r2:
+    label: KeyCorridor S3R2
+    config_path: config/envs/keycorridors3r2_cf.yaml
+    seeds: [0, 1, 2, 3, 4]
+    algos:
+      - ppo
+      - ppo-cf
+      - queried-perturb
+      - distilled-beta
+      - uncertainty-distilled
+      - active-distilled
+
+  keycorridors3r3:
+    label: KeyCorridor S3R3
+    config_path: config/envs/keycorridors3r3_cf.yaml
+    seeds: [0, 1, 2, 3, 4]
+    algos:
+      - ppo
+      - ppo-cf
+      - queried-perturb
+      - distilled-beta
+      - uncertainty-distilled
+      - active-distilled
+
+  doorkey6x6:
+    label: DoorKey 6x6
+    config_path: config/envs/doorkey6x6_cf.yaml
+    seeds: [3, 4]
+    algos:
+      - uncertainty-distilled
+      - active-distilled
+
+  unlockpickup:
+    label: UnlockPickup
+    config_path: config/envs/unlockpickup_cf.yaml
+    seeds: [3, 4]
+    algos:
+      - uncertainty-distilled
+      - active-distilled

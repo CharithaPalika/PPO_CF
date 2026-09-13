@@ -1,0 +1,242 @@
+{
+  "stage": "E3_ALL",
+  "groups": [
+    "uniform",
+    "uncertainty",
+    "active"
+  ],
+  "n_units": 36,
+  "blocking": false,
+  "gates": {
+    "doorkey6x6_active_beats_uniform_success_auc": {
+      "n_pairs": 3,
+      "mean_diff": 0.08604280888888895,
+      "ci_lo": -0.08325237333333335,
+      "ci_hi": 0.2732123733333334,
+      "wins": 2,
+      "better": true,
+      "insufficient": true,
+      "pass": false
+    },
+    "doorkey6x6_uncertainty_beats_uniform_success_auc": {
+      "n_pairs": 3,
+      "mean_diff": 0.12067896888888895,
+      "ci_lo": 0.006593599999999977,
+      "ci_hi": 0.31275434666666674,
+      "wins": 3,
+      "better": true,
+      "insufficient": true,
+      "pass": false
+    },
+    "doorkey6x6_active_beats_uncertainty_success_auc": {
+      "n_pairs": 3,
+      "mean_diff": -0.03463615999999999,
+      "ci_lo": -0.08984597333333333,
+      "ci_hi": 0.025479466666666672,
+      "wins": 1,
+      "better": false,
+      "insufficient": true,
+      "pass": false
+    },
+    "doorkey6x6_active_faster_than_uniform_to_50pct": {
+      "n_pairs": 3,
+      "mean_diff": -34042.666666666664,
+      "ci_lo": -102128.0,
+      "ci_hi": 0.0,
+      "wins": 1,
+      "better": true,
+      "insufficient": true,
+      "pass": false
+    },
+    "doorkey6x6_uncertainty_faster_than_uniform_to_50pct": {
+      "n_pairs": 3,
+      "mean_diff": -25626.666666666668,
+      "ci_lo": -76880.0,
+      "ci_hi": 0.0,
+      "wins": 1,
+      "better": true,
+      "insufficient": true,
+      "pass": false
+    },
+    "doorkey6x6_active_faster_than_uncertainty_to_50pct": {
+      "n_pairs": 3,
+      "mean_diff": -8416.0,
+      "ci_lo": -25248.0,
+      "ci_hi": 0.0,
+      "wins": 1,
+      "better": true,
+      "insufficient": true,
+      "pass": false
+    },
+    "redbluedoors6x6_active_beats_uniform_success_auc": {
+      "n_pairs": 3,
+      "mean_diff": 0.016542453333333335,
+      "ci_lo": -0.41712656000000004,
+      "ci_hi": 0.48993176,
+      "wins": 1,
+      "better": true,
+      "insufficient": true,
+      "pass": false
+    },
+    "redbluedoors6x6_uncertainty_beats_uniform_success_auc": {
+      "n_pairs": 3,
+      "mean_diff": -0.06324746666666664,
+      "ci_lo": -0.48348087999999995,
+      "ci_hi": 0.2711418400000001,
+      "wins": 2,
+      "better": false,
+      "insufficient": true,
+      "pass": false
+    },
+    "redbluedoors6x6_active_beats_uncertainty_success_auc": {
+      "n_pairs": 3,
+      "mean_diff": 0.07978992,
+      "ci_lo": -0.04577448,
+      "ci_hi": 0.21878991999999997,
+      "wins": 2,
+      "better": true,
+      "insufficient": true,
+      "pass": false
+    },
+    "redbluedoors6x6_active_faster_than_uniform_to_50pct": {
+      "n_pairs": 0,
+      "insufficient": true,
+      "pass": false
+    },
+    "redbluedoors6x6_uncertainty_faster_than_uniform_to_50pct": {
+      "n_pairs": 0,
+      "insufficient": true,
+      "pass": false
+    },
+    "redbluedoors6x6_active_faster_than_uncertainty_to_50pct": {
+      "n_pairs": 1,
+      "mean_diff": -280608.0,
+      "ci_lo": -280608.0,
+      "ci_hi": -280608.0,
+      "wins": 1,
+      "better": true,
+      "insufficient": true,
+      "pass": false
+    },
+    "taxi_active_beats_uniform_success_auc": {
+      "n_pairs": 3,
+      "mean_diff": 0.0424357333333333,
+      "ci_lo": -0.05487824000000008,
+      "ci_hi": 0.16576471999999998,
+      "wins": 2,
+      "better": true,
+      "insufficient": true,
+      "pass": false
+    },
+    "taxi_uncertainty_beats_uniform_success_auc": {
+      "n_pairs": 3,
+      "mean_diff": 0.11990968,
+      "ci_lo": -0.003860400000000097,
+      "ci_hi": 0.19679304000000009,
+      "wins": 2,
+      "better": true,
+      "insufficient": true,
+      "pass": false
+    },
+    "taxi_active_beats_uncertainty_success_auc": {
+      "n_pairs": 3,
+      "mean_diff": -0.0774739466666667,
+      "ci_lo": -0.1803723200000001,
+      "ci_hi": -0.0010316800000000348,
+      "wins": 0,
+      "better": false,
+      "insufficient": true,
+      "pass": false
+    },
+    "taxi_active_faster_than_uniform_to_50pct": {
+      "n_pairs": 3,
+      "mean_diff": -96826.66666666667,
+      "ci_lo": -291936.0,
+      "ci_hi": 50576.0,
+      "wins": 2,
+      "better": true,
+      "insufficient": true,
+      "pass": false
+    },
+    "taxi_uncertainty_faster_than_uniform_to_50pct": {
+      "n_pairs": 3,
+      "mean_diff": -152234.66666666666,
+      "ci_lo": -312416.0,
+      "ci_hi": 16432.0,
+      "wins": 2,
+      "better": true,
+      "insufficient": true,
+      "pass": false
+    },
+    "taxi_active_faster_than_uncertainty_to_50pct": {
+      "n_pairs": 3,
+      "mean_diff": 55408.0,
+      "ci_lo": 20480.0,
+      "ci_hi": 111600.0,
+      "wins": 0,
+      "better": false,
+      "insufficient": true,
+      "pass": false
+    },
+    "unlockpickup_active_beats_uniform_success_auc": {
+      "n_pairs": 3,
+      "mean_diff": 0.07306492444444446,
+      "ci_lo": -0.005111520000000147,
+      "ci_hi": 0.14655242666666668,
+      "wins": 2,
+      "better": true,
+      "insufficient": true,
+      "pass": false
+    },
+    "unlockpickup_uncertainty_beats_uniform_success_auc": {
+      "n_pairs": 3,
+      "mean_diff": -0.08896849777777778,
+      "ci_lo": -0.24190511999999997,
+      "ci_hi": 0.03776554666666654,
+      "wins": 1,
+      "better": false,
+      "insufficient": true,
+      "pass": false
+    },
+    "unlockpickup_active_beats_uncertainty_success_auc": {
+      "n_pairs": 3,
+      "mean_diff": 0.16203342222222225,
+      "ci_lo": -0.042877066666666686,
+      "ci_hi": 0.3196589866666668,
+      "wins": 2,
+      "better": true,
+      "insufficient": true,
+      "pass": false
+    },
+    "unlockpickup_active_faster_than_uniform_to_50pct": {
+      "n_pairs": 3,
+      "mean_diff": -108389.33333333333,
+      "ci_lo": -229296.0,
+      "ci_hi": 15872.0,
+      "wins": 2,
+      "better": true,
+      "insufficient": true,
+      "pass": false
+    },
+    "unlockpickup_uncertainty_faster_than_uniform_to_50pct": {
+      "n_pairs": 3,
+      "mean_diff": 132650.66666666666,
+      "ci_lo": -54176.0,
+      "ci_hi": 370992.0,
+      "wins": 1,
+      "better": false,
+      "insufficient": true,
+      "pass": false
+    },
+    "unlockpickup_active_faster_than_uncertainty_to_50pct": {
+      "n_pairs": 3,
+      "mean_diff": -241040.0,
+      "ci_lo": -482736.0,
+      "ci_hi": 70048.0,
+      "wins": 2,
+      "better": true,
+      "insufficient": true,
+      "pass": false
+    }
+  }
+}

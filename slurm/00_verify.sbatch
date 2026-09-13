@@ -61,14 +61,17 @@ echo
 echo "--- 2. every stage config resolves ---"
 python - <<'PY'
 import sys
-from pipeline.stages import STAGES, GROUPS_ALL, build_config
+from pipeline.stages import (ALL_EXPERIMENT_STAGE, CONFIG_ALGO_GROUP, GROUPS_ALL,
+                             STAGES, build_config, pooled_stages)
 for stage in STAGES:
-    if stage in ("E2_ALL", "E3_ALL"):
+    if stage in pooled_stages():
         continue  # pooled manifests; units are concrete environment stages
     if stage.startswith("E2_"):
         groups = ("queried", "distill")
     elif stage.startswith("E3_"):
         groups = ("uniform", "uncertainty", "active")
+    elif STAGES[stage].get("matrix_stage") == ALL_EXPERIMENT_STAGE:
+        groups = tuple(CONFIG_ALGO_GROUP[a] for a in STAGES[stage]["matrix_algos"])
     else:
         groups = GROUPS_ALL
     for group in groups:

@@ -1,0 +1,31 @@
+{
+  "stage": "EXP1_TAXI",
+  "groups": [
+    "gae",
+    "cf"
+  ],
+  "n_units": 10,
+  "blocking": false,
+  "gates": {
+    "cf_beats_gae_success_auc": {
+      "n_pairs": 5,
+      "mean_diff": 0.04832169317602418,
+      "ci_lo": 0.031944432,
+      "ci_hi": 0.059774650352048354,
+      "wins": 5,
+      "better": true,
+      "insufficient": false,
+      "pass": true
+    },
+    "cf_faster_than_gae_to_50pct": {
+      "n_pairs": 5,
+      "mean_diff": -42019.2,
+      "ci_lo": -65718.4,
+      "ci_hi": -14624.0,
+      "wins": 4,
+      "better": true,
+      "insufficient": false,
+      "pass": true
+    }
+  }
+}

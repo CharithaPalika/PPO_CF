@@ -1,5 +1,118 @@
 # RUNBOOK - Cluster Runs
 
+## Config-driven sweep: `all_experiment_config`
+
+Use this path for the editable mixed sweep controlled by
+`slurm/all_experiment_config.yaml`. The YAML is the source of truth for:
+
+- environment config paths
+- per-environment seed lists
+- per-environment algorithm lists
+- the default perturbation/distillation beta, currently `0.75`
+
+The current matrix contains:
+
+| environment | seeds | algorithms | units |
+|---|---:|---|---:|
+| RedBlueDoors 6x6 | `0,1,2,3,4` | `ppo`, `ppo-cf`, `queried-perturb`, `distilled-beta`, `uncertainty-distilled`, `active-distilled` | 30 |
+| KeyCorridor S3R2 | `0,1,2,3,4` | same six algorithms | 30 |
+| KeyCorridor S3R3 | `0,1,2,3,4` | same six algorithms | 30 |
+| DoorKey 6x6 | `3,4` | `uncertainty-distilled`, `active-distilled` | 4 |
+| UnlockPickup | `3,4` | `uncertainty-distilled`, `active-distilled` | 4 |
+
+Total: **98 training units**. DoorKey 6x6 and UnlockPickup are restricted to
+seeds `3,4` because local `runs/` already contains E1/E2 at five seeds and E3
+at seeds `0,1,2`; uniform is intentionally not included in this config.
+
+Algorithm name mapping:
+
+| YAML algo | internal group | key override |
+|---|---|---|
+| `ppo` | `gae` | `ppo.pg_mode=gae` |
+| `ppo-cf` | `cf` | `ppo.pg_mode=cf_all_action` |
+| `queried-perturb` | `queried` | `ppo.pg_mode=cf_queried_perturb`, `cf_subsample=0.02`, `norm_adv=batch` |
+| `distilled-beta` | `distill` | `ppo.pg_mode=landscape_distill`, uniform labels, beta from YAML |
+| `uncertainty-distilled` | `uncertainty` | `landscape_distill`, uncertainty labels, beta from YAML |
+| `active-distilled` | `active` | `landscape_distill`, uncertainty-leverage labels, beta from YAML |
+
+### Upload and prepare
+
+From the local repository directory:
+
+```bash
+ssh -J aniket@stujump.comp.nus.edu.sg aniket@xlogin.comp.nus.edu.sg 'mkdir -p ~/ppo_cf'
+scp -J aniket@stujump.comp.nus.edu.sg -r ./* aniket@xlogin.comp.nus.edu.sg:~/ppo_cf/
+```
+
+Then on the cluster:
+
+```bash
+ssh -J aniket@stujump.comp.nus.edu.sg aniket@xlogin.comp.nus.edu.sg
+cd ~/ppo_cf
+bash slurm/fix_line_endings.sh
+chmod +x submit_all_experiment_config.sh submit_*.sh slurm/*.sh slurm/*.sbatch
+```
+
+### Verify
+
+```bash
+mkdir -p logs
+sbatch slurm/00_create_venv.sbatch
+cat logs/venv_<jobid>.out
+
+source .venv/bin/activate
+wandb login
+deactivate
+
+sbatch slurm/00_verify.sbatch
+cat logs/verify_<jobid>.out
+```
+
+The verification log must end with `verify OK`.
+
+### Submit
+
+```bash
+cd ~/ppo_cf
+./submit_all_experiment_config.sh
+```
+
+The default is 16 chunks. To use another chunk count:
+
+```bash
+./submit_all_experiment_config.sh 12
+```
+
+The array is throttled to 12 concurrent workers by default. To change that for
+one submission:
+
+```bash
+PPO_CF_CONCURRENCY=8 ./submit_all_experiment_config.sh 12
+```
+
+Before walking away, check the manifest receipt:
+
+```bash
+cat logs/manifest_<jobid>.out
+```
+
+It must report:
+
+```text
+[ALL_EXPERIMENT_CONFIG] 6 groups: gae, cf, queried, distill, uncertainty, active
+[ALL_EXPERIMENT_CONFIG] 98 units pending
+```
+
+The pooled ledger is:
+
+```text
+artifacts/tables/ALL_EXPERIMENT_CONFIG.csv
+```
+
+Runs publish to W&B by default with namespace `all_experiment_config_v1`.
+Change `PPO_CF_WANDB_RUN_NAMESPACE` only when starting a genuinely fresh sweep;
+keep it unchanged across retries so interrupted units resume the same W&B run.
+
 ## E2: queried vs distilled counterfactual-advantage perturbation
 
 E2 has **two** arms, not a new PPO/GAE comparison. E1 already provides the

@@ -1,0 +1,52 @@
+{
+  "stage": "E1_RBD6",
+  "groups": [
+    "gae",
+    "cf",
+    "shuf"
+  ],
+  "n_units": 15,
+  "blocking": false,
+  "gates": {
+    "cf_beats_gae_success_auc": {
+      "n_pairs": 5,
+      "mean_diff": 0.13806076602604075,
+      "ci_lo": -0.05998080487765593,
+      "ci_hi": 0.3363307369871044,
+      "wins": 3,
+      "better": true,
+      "insufficient": false,
+      "pass": false
+    },
+    "cf_beats_shuf_success_auc": {
+      "n_pairs": 5,
+      "mean_diff": -0.017837063149747277,
+      "ci_lo": -0.11833727367235189,
+      "ci_hi": 0.11187373312167717,
+      "wins": 2,
+      "better": false,
+      "insufficient": false,
+      "pass": false
+    },
+    "cf_faster_than_gae_to_50pct": {
+      "n_pairs": 4,
+      "mean_diff": -87280.0,
+      "ci_lo": -408344.0,
+      "ci_hi": 233784.0,
+      "wins": 2,
+      "better": true,
+      "insufficient": true,
+      "pass": false
+    },
+    "cf_faster_than_shuf_to_50pct": {
+      "n_pairs": 5,
+      "mean_diff": 39033.6,
+      "ci_lo": -207267.2,
+      "ci_hi": 238739.2,
+      "wins": 2,
+      "better": false,
+      "insufficient": false,
+      "pass": false
+    }
+  }
+}

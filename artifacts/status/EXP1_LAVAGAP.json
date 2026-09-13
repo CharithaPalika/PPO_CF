@@ -1,0 +1,31 @@
+{
+  "stage": "EXP1_LAVAGAP",
+  "groups": [
+    "gae",
+    "cf"
+  ],
+  "n_units": 10,
+  "blocking": false,
+  "gates": {
+    "cf_beats_gae_success_auc": {
+      "n_pairs": 5,
+      "mean_diff": -0.024408464523321027,
+      "ci_lo": -0.15994847598406,
+      "ci_hi": 0.06827619057503062,
+      "wins": 3,
+      "better": false,
+      "insufficient": false,
+      "pass": false
+    },
+    "cf_faster_than_gae_to_50pct": {
+      "n_pairs": 4,
+      "mean_diff": -4624.0,
+      "ci_lo": -12132.0,
+      "ci_hi": 2496.0,
+      "wins": 2,
+      "better": true,
+      "insufficient": true,
+      "pass": false
+    }
+  }
+}

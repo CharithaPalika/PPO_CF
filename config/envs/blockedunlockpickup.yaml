@@ -1,0 +1,90 @@
+# MiniGrid-BlockedUnlockPickup-v0 -- plain PPO baseline.
+#
+# WEB CHECK (2026-09-12). Farama documents this environment as a 7-action
+# MiniGrid task that can be solved without relying on language: move the
+# blocking ball, pick up the key, unlock the door, and pick up the target object
+# in the other room. RL Baselines3 Zoo does not currently list a tuned PPO row
+# for BlockedUnlockPickup, so this starts from this repo's successful
+# UnlockPickup fixed-layout/action-floor recipe rather than pretending the
+# public MiniGrid default is enough.
+#
+# WHY NOT COPY RL-ZOO LITERALLY.
+#   zoo default: FlatObsWrapper + MlpPolicy over MiniGrid's egocentric view
+#   here:        FullyObsWrapper + image CNN, so PPO-CF later restores a Markov
+#                simulator state and queries the policy on exactly that state.
+#
+# Hyperparameter source:
+#   - shared MiniGrid PPO values from RL Zoo: n_steps 128, gamma 0.99,
+#     gae_lambda 0.95, clip 0.2.
+#   - exploration recipe from this repo's UnlockPickup config: fixed layout,
+#     ent_coef 0.1, and a per-action floor to keep pickup/drop/toggle alive.
+
+env:
+  env_id: MiniGrid-BlockedUnlockPickup-v0
+  n_envs: 16
+  max_episode_steps: null
+  obs_norm: image
+  fully_observable: true
+  success_on: terminated
+  layout_seeds: [0]
+  layout_seed_mode: cycle
+
+ppo:
+  total_timesteps: 2000000
+  n_steps: 128
+  n_epochs: 4
+  n_minibatches: 8
+  learning_rate: 0.001
+  anneal_lr: false
+  optim_eps: 1.0e-8
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_coef: 0.2
+  clip_vloss: true
+  ent_coef: 0.1
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: null
+
+  norm_adv: batch
+  norm_adv_min_std: 1.0e-06
+
+  pg_mode: gae
+  ent_mode: fixed
+  prob_floor_start: 0.20
+  prob_floor_end: 0.05
+
+  encoder: cnn
+  share_encoder: true
+  hidden_sizes: [64]
+  activation: tanh
+  separate_grad_clip: false
+  device: cpu
+
+run:
+  run_name: blockedunlockpickup_fixed0_floor
+  seeds: [0]
+  trajectory_stride: 4
+  compact_trajectory_dtypes: true
+  log_every_updates: 10
+  record_trajectories: true
+  eval_every_updates: 0
+  eval_episodes: 20
+  init_from: null
+
+reward:
+  potential_shaping: false
+  potential_key: 0.0
+  potential_door: 0.0
+  count_bonus_coef: 0.0
+
+oracle:
+  checkpoint_fraction: 0.75
+
+note: |
+  Watch pickup (3), drop (4), and toggle (5). This task is a strict extension
+  of UnlockPickup: the agent must also clear the door before the key-door-box
+  chain can pay reward. The first pass fixes layout seed 0 so the comparison
+  asks whether the action-dependent CF signal helps on the local action
+  landscape, not whether PPO generalizes across procedurally varied layouts.
+

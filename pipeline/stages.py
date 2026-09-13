@@ -81,6 +81,26 @@ E3_QUERY_STRATEGY = {
     "active": "uncertainty_leverage",
 }
 
+ALL_EXPERIMENT_STAGE = "ALL_EXPERIMENT_CONFIG"
+ALL_EXPERIMENT_CONFIG = ROOT / "slurm" / "all_experiment_config.yaml"
+CONFIG_STAGE_PREFIX = "CFG_"
+
+CONFIG_ALGO_GROUP = {
+    "ppo": "gae",
+    "ppo-cf": "cf",
+    "queried-perturb": "queried",
+    "distilled-beta": "distill",
+    "uncertainty-distilled": "uncertainty",
+    "active-distilled": "active",
+}
+
+CONFIG_BETA_GROUPS = {"queried", "distill", "uncertainty", "active"}
+CONFIG_QUERY_STRATEGY = {
+    "distill": "uniform",
+    "uncertainty": "uncertainty",
+    "active": "uncertainty_leverage",
+}
+
 #: Trajectory datasets are 25 MB/seed and feed NB03+ (E2/E3 distillation), not
 #: E1. Off here takes a seed from ~25 MB to ~4 MB -- 30 runs, ~110 MB instead
 #: of ~1.5 GB. Set PPO_CF_RECORD_TRAJECTORIES=1 to turn them back on.
@@ -102,8 +122,10 @@ E3_SEEDS = list(range(3))
 E2_BETAS = (0.25, 0.75, 1.5)
 E3_BETA = 0.75
 
-#: Frame override used only by the historical RedBlue E1 stages below. The new
-#: EXP1_* stages use their YAML budgets as the source of truth.
+#: Frame override used by RedBlue E1 stages. RedBlue-6x6 is especially sensitive
+#: because a historical EXP1 submission ran from an older 1M-frame YAML while
+#: the notebook/E1 stage used 2M; pinning it here keeps cluster and notebook
+#: comparisons on the same budget.
 FRAMES = 2_000_000
 
 STAGES: dict[str, dict] = {
@@ -190,7 +212,7 @@ STAGES: dict[str, dict] = {
         "env_config": "redbluedoors6x6_cf",
         "env_tag": "redbluedoors6x6",
         "seeds": SEEDS,
-        "overrides": {},
+        "overrides": {"ppo.total_timesteps": FRAMES},
     },
     "EXP1_TAXI": {
         "env_config": "taxi_cf",
@@ -272,6 +294,87 @@ STAGES: dict[str, dict] = {
     },
 }
 
+
+def _config_stage_name(env_name: str) -> str:
+    stem = "".join(ch.upper() if ch.isalnum() else "_" for ch in env_name).strip("_")
+    if not stem:
+        raise ValueError("environment key in all_experiment_config.yaml cannot be empty")
+    return f"{CONFIG_STAGE_PREFIX}{stem}"
+
+
+def _register_all_experiment_config() -> None:
+    """Expose slurm/all_experiment_config.yaml as one pooled Slurm stage.
+
+    The YAML stays human-facing: each environment lists readable algorithm
+    names and seeds. This function translates that into the existing internal
+    stage/group vocabulary so manifest/chunk/analyse can reuse the same resume
+    machinery as E2/E3.
+    """
+    if not ALL_EXPERIMENT_CONFIG.exists():
+        return
+
+    import yaml
+
+    blob = yaml.safe_load(ALL_EXPERIMENT_CONFIG.read_text()) or {}
+    defaults = blob.get("defaults") or {}
+    envs = blob.get("environments") or {}
+    if not isinstance(envs, dict) or not envs:
+        raise ValueError(f"{ALL_EXPERIMENT_CONFIG} must define a non-empty environments mapping")
+
+    default_beta = float(defaults.get("beta", E3_BETA))
+    registered = []
+    seen_stages: set[str] = set()
+    for env_name, env in envs.items():
+        if not isinstance(env, dict):
+            raise TypeError(f"{env_name}: environment entry must be a mapping")
+        stage_name = _config_stage_name(str(env_name))
+        if stage_name in seen_stages or stage_name in STAGES:
+            raise ValueError(f"{env_name}: duplicate generated stage name {stage_name}")
+        seen_stages.add(stage_name)
+
+        config_path = env.get("config_path")
+        if not config_path:
+            raise ValueError(f"{env_name}: missing config_path")
+        seeds = [int(s) for s in env.get("seeds", [])]
+        if not seeds:
+            raise ValueError(f"{env_name}: seeds must be a non-empty list")
+        algos = [str(a) for a in env.get("algos", [])]
+        unknown = [a for a in algos if a not in CONFIG_ALGO_GROUP]
+        if unknown:
+            raise ValueError(
+                f"{env_name}: unknown algos {unknown}; known {sorted(CONFIG_ALGO_GROUP)}")
+
+        beta = float(env.get("beta", default_beta))
+        STAGES[stage_name] = {
+            "env_config": str(config_path),
+            "env_tag": str(env_name),
+            "seeds": seeds,
+            "overrides": {},
+            "matrix_stage": ALL_EXPERIMENT_STAGE,
+            "matrix_algos": algos,
+            "matrix_beta": beta,
+            "matrix_label": str(env.get("label", env_name)),
+        }
+        registered.append({
+            "env_name": str(env_name),
+            "stage": stage_name,
+            "seeds": seeds,
+            "algos": algos,
+            "beta": beta,
+        })
+
+    STAGES[ALL_EXPERIMENT_STAGE] = {
+        "env_tag": "mixed",
+        "seeds": [],
+        "overrides": {},
+        "matrix_config": str(ALL_EXPERIMENT_CONFIG.relative_to(ROOT)),
+        "matrix_name": str(blob.get("name", ALL_EXPERIMENT_STAGE.lower())),
+        "matrix_envs": registered,
+    }
+
+
+_register_all_experiment_config()
+
 #: E1_RBD6 finishes -> E1_RBD8 is submitted automatically. `PART_END` in the
 #: submit script is what stops the chain.
 CHAIN_NEXT = {
@@ -296,6 +399,11 @@ CHAIN_NEXT = {
     "E3_RBD6": None,
     "E3_ALL": None,
 }
+if ALL_EXPERIMENT_STAGE in STAGES:
+    CHAIN_NEXT[ALL_EXPERIMENT_STAGE] = None
+    for _stage_name, _spec in STAGES.items():
+        if _spec.get("matrix_stage") == ALL_EXPERIMENT_STAGE:
+            CHAIN_NEXT[_stage_name] = None
 
 #: Stages with no parallel work at all (none in E1).
 ANALYSIS_ONLY: set[str] = set()
@@ -317,6 +425,13 @@ SMOKE_FRAMES = int(os.environ.get("PPO_CF_SMOKE_FRAMES", "0"))
 ART = ART_BASE / "_smoke" if SMOKE_FRAMES else ART_BASE
 
 
+def pooled_stages() -> set[str]:
+    out = {"E2_ALL", "E3_ALL"}
+    if ALL_EXPERIMENT_STAGE in STAGES:
+        out.add(ALL_EXPERIMENT_STAGE)
+    return out
+
+
 def art_key(stage: str) -> str:
     """The name a stage's artifacts are filed under."""
     return stage
@@ -330,6 +445,8 @@ LEDGER = {s: ART / "tables" / f"{art_key(s)}.csv" for s in STAGES}
 KEYS = {s: ["group", "seed"] for s in STAGES}
 KEYS["E2_ALL"] = ["stage", "group", "seed", "beta"]
 KEYS["E3_ALL"] = ["stage", "group", "seed", "beta"]
+if ALL_EXPERIMENT_STAGE in STAGES:
+    KEYS[ALL_EXPERIMENT_STAGE] = ["stage", "group", "seed", "beta"]
 
 
 def beta_slug(beta: float) -> str:
@@ -366,6 +483,22 @@ def run_list(stage: str, groups: list[str]) -> list[dict]:
         env_stages = ("E3_TAXI", "E3_DK6", "E3_UNLOCKPICKUP", "E3_RBD6")
         return [{"stage": env_stage, "group": group, "seed": seed, "beta": E3_BETA}
                 for seed in E3_SEEDS for env_stage in env_stages for group in groups]
+    if stage == ALL_EXPERIMENT_STAGE:
+        group_filter = set(groups)
+        tasks = []
+        for env in STAGES[stage]["matrix_envs"]:
+            for algo in env["algos"]:
+                group = CONFIG_ALGO_GROUP[algo]
+                if group not in group_filter:
+                    continue
+                beta = env["beta"] if group in CONFIG_BETA_GROUPS else "none"
+                tasks.extend({
+                    "stage": env["stage"],
+                    "group": group,
+                    "seed": seed,
+                    "beta": beta,
+                } for seed in env["seeds"])
+        return tasks
     seeds = STAGES[stage]["seeds"]
     return [{"stage": stage, "group": g, "seed": s} for g in groups for s in seeds]
 
@@ -382,11 +515,19 @@ def build_config(stage: str, group: str, seed: int, beta: float | None = None):
     """The exact ExperimentConfig one unit runs. Importable for a dry run."""
     from config import make_config
 
-    if stage in ("E2_ALL", "E3_ALL"):
+    if stage in pooled_stages():
         raise ValueError(f"{stage} is a pooled manifest, not an executable environment stage")
     spec = STAGES[stage]
     over = dict(spec["overrides"])
     over["ppo.pg_mode"] = ARM_PG_MODE[group]
+    if spec.get("matrix_stage") == ALL_EXPERIMENT_STAGE:
+        if group in CONFIG_BETA_GROUPS:
+            beta = spec["matrix_beta"] if beta in (None, "none") else float(beta)
+            over["distill.beta"] = beta
+            over["ppo.cf_subsample"] = 0.02
+            over["ppo.norm_adv"] = "batch"
+        if group in CONFIG_QUERY_STRATEGY:
+            over["distill.query_strategy"] = CONFIG_QUERY_STRATEGY[group]
     if stage.startswith("E2_"):
         beta = E2_BETAS[0] if beta is None else float(beta)
         if beta not in E2_BETAS:
@@ -400,7 +541,8 @@ def build_config(stage: str, group: str, seed: int, beta: float | None = None):
             raise ValueError(f"E3 group must be one of {sorted(E3_QUERY_STRATEGY)}, got {group!r}")
         over["distill.beta"] = beta
         over["distill.query_strategy"] = E3_QUERY_STRATEGY[group]
-    over["run.run_name"] = run_name(stage, group, beta)
+    run_beta = None if beta == "none" else beta
+    over["run.run_name"] = run_name(stage, group, run_beta)
     over["run.seeds"] = (int(seed),)
     over["run.record_trajectories"] = RECORD_TRAJECTORIES
     over["run.log_every_updates"] = LOG_EVERY_UPDATES
@@ -434,6 +576,7 @@ def execute(task: dict) -> dict:
 
     beta = task.get("beta")
     cfg = build_config(stage, group, seed, beta=beta)
+    matrix_unit = STAGES[stage].get("matrix_stage") == ALL_EXPERIMENT_STAGE
 
     # W&B, if enabled, is grouped by environment stage so comparable arms sit
     # in one comparison. The launcher selects online/offline mode; telemetry
@@ -444,7 +587,8 @@ def execute(task: dict) -> dict:
     beta_group = group in ("queried", "distill", "uniform", "uncertainty", "active")
     os.environ["PPO_CF_WANDB_GROUP"] = f"{stage}_{beta_tag}" if beta_group else stage
     os.environ["PPO_CF_WANDB_JOB_TYPE"] = algo_tag
-    query_tag = f",query-{cfg.distill.query_strategy}" if group in E3_QUERY_STRATEGY else ""
+    query_group = group in E3_QUERY_STRATEGY or (matrix_unit and group in CONFIG_QUERY_STRATEGY)
+    query_tag = f",query-{cfg.distill.query_strategy}" if query_group else ""
     os.environ["PPO_CF_WANDB_TAGS"] = f"{env_tag(stage)},{algo_tag},{beta_tag}{query_tag}"
 
     print(cfg.summary(), flush=True)
@@ -459,8 +603,8 @@ def execute(task: dict) -> dict:
         "env_tag": env_tag(stage),
         "algo_tag": algo_tag,
         "seed": seed,
-        "beta": cfg.distill.beta if beta_group else float("nan"),
-        "query_strategy": cfg.distill.query_strategy if group in E3_QUERY_STRATEGY else "",
+        "beta": cfg.distill.beta if beta_group else ("none" if matrix_unit else float("nan")),
+        "query_strategy": cfg.distill.query_strategy if query_group else "",
         "run_name": cfg.run.run_name,
         "env_id": cfg.env.env_id,
         "config_source": cfg.source,
@@ -598,7 +742,14 @@ def merge_chunks(stage: str) -> None:
 
 def pending(stage: str, wanted: list[dict]) -> list[dict]:
     """The subset of `wanted` with no ledger row. This function IS the resume
-    logic; there is no state anywhere else."""
+    logic; there is no state anywhere else.
+
+    A completed unit only counts if it matches the CURRENT stage config. This
+    matters when a stage budget is corrected after a run: RedBlueDoors-6x6 once
+    had 1M-frame EXP1 rows in the ledger, while the notebook and intended stage
+    used 2M. A plain (group, seed) resume key would silently skip the corrected
+    2M units forever.
+    """
     import pandas as pd
 
     led = LEDGER[stage]
@@ -608,5 +759,30 @@ def pending(stage: str, wanted: list[dict]) -> list[dict]:
     keys = KEYS[stage]
     if any(k not in df.columns for k in keys):
         return list(wanted)
-    have = {tuple(str(r[k]) for k in keys) for _, r in df.iterrows()}
-    return [t for t in wanted if tuple(str(t[k]) for k in keys) not in have]
+    rows_by_key = {tuple(str(r[k]) for k in keys): r for _, r in df.iterrows()}
+
+    out = []
+    for task in wanted:
+        key = tuple(str(task[k]) for k in keys)
+        row = rows_by_key.get(key)
+        if row is None:
+            out.append(task)
+            continue
+        if "total_timesteps" not in df.columns:
+            continue
+
+        executable_stage = task["stage"] if stage in pooled_stages() else stage
+        expected = build_config(
+            executable_stage,
+            task["group"],
+            int(task["seed"]),
+            beta=task.get("beta"),
+        ).ppo.total_timesteps
+        try:
+            actual = int(row["total_timesteps"])
+        except (TypeError, ValueError):
+            out.append(task)
+            continue
+        if actual != expected:
+            out.append(task)
+    return out

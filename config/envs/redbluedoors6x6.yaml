@@ -47,7 +47,7 @@ env:
   layout_seed_mode: cycle
 
 ppo:
-  total_timesteps: 1000000     # rl-baselines3-zoo's budget for this env
+  total_timesteps: 2000000     # rl-baselines3-zoo's budget for this env
   n_steps: 512                 # zoo's value for this env; 16 x 512 = 8192
   n_epochs: 4
   n_minibatches: 8             # -> minibatch 1024

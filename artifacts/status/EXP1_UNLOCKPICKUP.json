@@ -1,0 +1,31 @@
+{
+  "stage": "EXP1_UNLOCKPICKUP",
+  "groups": [
+    "gae",
+    "cf"
+  ],
+  "n_units": 10,
+  "blocking": false,
+  "gates": {
+    "cf_beats_gae_success_auc": {
+      "n_pairs": 5,
+      "mean_diff": 0.06709993029366886,
+      "ci_lo": -0.015107039599407512,
+      "ci_hi": 0.14087120254249824,
+      "wins": 4,
+      "better": true,
+      "insufficient": false,
+      "pass": false
+    },
+    "cf_faster_than_gae_to_50pct": {
+      "n_pairs": 5,
+      "mean_diff": -103075.2,
+      "ci_lo": -215235.2,
+      "ci_hi": 28569.6,
+      "wins": 4,
+      "better": true,
+      "insufficient": false,
+      "pass": false
+    }
+  }
+}

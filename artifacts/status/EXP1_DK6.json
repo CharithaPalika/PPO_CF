@@ -1,0 +1,31 @@
+{
+  "stage": "EXP1_DK6",
+  "groups": [
+    "gae",
+    "cf"
+  ],
+  "n_units": 10,
+  "blocking": false,
+  "gates": {
+    "cf_beats_gae_success_auc": {
+      "n_pairs": 5,
+      "mean_diff": 0.1411430443469603,
+      "ci_lo": 0.020910560593172877,
+      "ci_hi": 0.2453015012955345,
+      "wins": 4,
+      "better": true,
+      "insufficient": false,
+      "pass": true
+    },
+    "cf_faster_than_gae_to_50pct": {
+      "n_pairs": 5,
+      "mean_diff": -38288.0,
+      "ci_lo": -81328.0,
+      "ci_hi": 384.0,
+      "wins": 2,
+      "better": true,
+      "insufficient": false,
+      "pass": false
+    }
+  }
+}

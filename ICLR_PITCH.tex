@@ -1,0 +1,398 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,booktabs,array,enumitem,hyperref,xcolor}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue,citecolor=blue}
+
+\newcommand{\ppocf}{\textsc{PPO-CF}}
+\newcommand{\pposca}{\textsc{PPO-SCA}}
+\newcommand{\ppo}{\textsc{PPO}}
+\newcommand{\todo}[1]{\textcolor{red}{\textbf{TODO:} #1}}
+
+\title{Steering Policy Optimization with Sparse Counterfactual Advantages}
+\author{Paper pitch and writing blueprint}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Policy-gradient agents are usually controlled through rewards, although the
+policy is updated through an advantage estimator. We study \emph{counterfactual
+advantage steering}: augmenting PPO's actor update with a policy-centered,
+action-selective counterfactual advantage while leaving the environment reward,
+GAE targets, and critic update unchanged. We first show that a state-only
+advantage perturbation cancels from the expected policy gradient; behavioral
+control therefore requires an action-selective residual. Guided by this
+observation, our method queries exact local counterfactual action values at a
+small subset of rollout states and injects the resulting centered landscape
+into PPO's sampled-action objective. Across long-horizon visual control tasks,
+sparse counterfactual queries consistently improve learning relative to PPO and
+often match or exceed a more expensive direct counterfactual baseline. In
+contrast, globally propagating sparse labels through an imperfect distilled
+landscape can be unreliable. These results identify sparse, action-aligned
+counterfactual advantages as a lightweight control interface for policy
+optimization.
+\end{abstract}
+
+\section*{Abstract 2: problem--need--method--importance}
+\begin{abstract}
+PPO is typically guided by modifying rewards, but reward design is often
+expensive, changes the task being optimized, and can unintentionally alter the
+critic's learning target. This is especially limiting in structured simulators,
+where a small number of local counterfactual evaluations may reveal which action
+is preferable without requiring a new reward function. We ask whether this
+privileged but sparse information can be used to guide the policy update
+directly. We introduce \emph{counterfactual advantage steering}, which adds a
+policy-centered, action-selective counterfactual advantage to PPO's actor loss
+at a small subset of rollout states, while preserving the environment reward,
+GAE returns, and critic update. Our analysis shows why action selectivity is
+necessary: state-only advantage offsets cancel from the expected policy
+gradient. Empirically, sparse exact counterfactual queries improve learning on
+long-horizon visual control tasks and are often more reliable than applying a
+distilled counterfactual estimate everywhere. By separating policy guidance
+from reward and value-target design, this work provides a practical route for
+using structured simulators to make policy optimization more efficient and
+controllable.
+\end{abstract}
+
+\section*{One-sentence paper claim}
+\begin{quote}
+\emph{A small number of exact, policy-centered counterfactual advantages can
+steer PPO's actor update more effectively than either ordinary PPO or a noisy
+dense approximation, without modifying rewards or critic targets.}
+\end{quote}
+
+\paragraph{Scope.}
+This is deliberately a paper about \emph{sparse exact counterfactual advantage
+queries}, not about TD clipping, generic advantage bias, a learned dense
+landscape, or reward shaping. The secondary-goal work supports the intuition
+that the actor advantage is a control interface, but it is not a primary
+empirical claim in this version of the paper.
+
+\section{Introduction: why this problem matters}
+\label{sec:intro}
+
+\paragraph{Opening.}
+Start with the mismatch between how PPO is commonly controlled and how it is
+actually optimized. Rewards and critic targets are slow, global control
+mechanisms. The actor, however, only sees a scalar advantage associated with
+the sampled action. A simulator or structured environment can sometimes answer
+the local question ``what would happen under the other actions at this state?''
+The question is whether a small number of such local answers can improve policy
+optimization without rewriting the reward function.
+
+\paragraph{Gap.}
+Full counterfactual PPO is computationally expensive because it needs an
+all-action landscape at many states. An obvious alternative is to learn a
+landscape from sparse labels and apply it everywhere. The experiments show that
+this alternative is not automatically safe: approximation error in the
+action-relevant direction can hurt the policy even when the student is trained
+on the same label budget.
+
+\paragraph{Contribution paragraph to write.}
+State exactly three contributions.
+\begin{enumerate}[leftmargin=1.6em]
+  \item We isolate the action-selective component of an advantage perturbation
+  as the part that affects the expected actor gradient.
+  \item We introduce \pposca{}: PPO with sparse exact counterfactual advantage
+  queries, injected into the ordinary sampled-action actor loss while rewards,
+  returns, and critic targets are untouched.
+  \item We show on four main MiniGrid tasks that sparse exact queries improve
+  learning over PPO, compare favorably with direct \ppocf{}, and are more
+  reliable than naively applying an imperfect distilled landscape everywhere.
+\end{enumerate}
+
+\paragraph{Do not write in the introduction.}
+Do not lead with TD clipping, adversarial attacks, backdoors, uncertainty
+selection, active distillation, or the custom secondary-goal environment.
+Those are either separate projects or ablations which obscure the central
+algorithmic claim.
+
+\section{Background and mechanism: advantage perturbations}
+\label{sec:mechanism}
+
+\paragraph{Core derivation.}
+Let an actor use an altered estimator
+\begin{equation}
+  \widehat A^f(s,a) = \widehat A(s,a) + f(s,a).
+\end{equation}
+The additional expected policy-gradient contribution is determined by
+\begin{equation}
+  \Delta_f(s,a)
+  = f(s,a) - \mathbb{E}_{a'\sim\pi(\cdot\mid s)}[f(s,a')].
+  \label{eq:centered-residual}
+\end{equation}
+This equation should be the central conceptual figure or boxed proposition:
+the state-only portion of $f$ is removed by the score-function identity, while
+the policy-centered action-dependent residual remains.
+
+\paragraph{Result to use from the advantage-perturbation folder.}
+Use the \emph{mechanistic control}, not TD clipping. The relevant experiment is
+the matched state-only versus action-selective perturbation result from
+\texttt{Adv\_perturbation\_experiments/TD\_CLIPPING.zip}. It establishes the
+following qualitative fact: at the same realized perturbation scale, a
+state-varying but action-independent term is an exact null for the expected
+actor gradient, whereas an action-selective term changes learning. Present it
+as a sanity check for Equation~\eqref{eq:centered-residual}, not as a second
+main benchmark suite.
+
+\paragraph{Suggested figure.}
+\begin{center}
+\fbox{\parbox{0.85\linewidth}{
+\textbf{Figure 1: Action selectivity is necessary.} Plot performance or update
+displacement against perturbation strength for clean, state-only ($\beta=0$),
+and action-selective ($\beta=1$) perturbations. Hold realized perturbation
+scale fixed. The visual message is ``same magnitude, different effect.''}}
+\end{center}
+
+\section{Method: sparse counterfactual advantage queries}
+\label{sec:method}
+
+\paragraph{Counterfactual landscape.}
+At a queried simulator state $s$, evaluate local action values
+$Q_{\rm CF}(s,a)$ and policy-center them:
+\begin{equation}
+ A_{\rm CF}(s,a) = Q_{\rm CF}(s,a) -
+ \sum_{a'}\pi_{\rm old}(a'\mid s)Q_{\rm CF}(s,a').
+ \label{eq:cf-advantage}
+\end{equation}
+The centering is essential: it makes the intervention explicitly
+action-selective and prevents a state-wide offset from being mistaken for
+useful policy guidance.
+
+\paragraph{PPO-SCA update.}
+For a queried transition, modify only the sampled-action actor advantage:
+\begin{equation}
+ A_{\rm actor,t} = \operatorname{norm}(A_{\rm GAE,t}) +
+ \beta\,\frac{A_{\rm CF}(s_t,a_t)}{\sigma_{\rm GAE}}.
+ \label{eq:sca-update}
+\end{equation}
+For unqueried transitions, use standard normalized GAE. In prose, explicitly
+state the three invariants:
+\begin{enumerate}[leftmargin=1.6em]
+  \item The environment reward is unchanged.
+  \item GAE returns and value targets are unchanged.
+  \item The counterfactual term is detached and affects only the actor loss.
+\end{enumerate}
+This distinguishes the method from reward shaping, critic-target shaping, and
+an auxiliary value function.
+
+\paragraph{Query budget.}
+The main setting uses exact all-action counterfactual landscapes at 2\% of
+rollout states and uses $\beta=0.75$. Before submission, write down a fixed
+selection rule for $\beta$ (or retain the full $\{0.25,0.75,1.5\}$ sweep in the
+appendix). The paper must not imply that $\beta=0.75$ was uniquely selected
+after inspecting only the best curves.
+
+\paragraph{Pseudocode.}
+Include a short algorithm box: collect PPO rollout; uniformly choose 2\% of
+states; restore each selected simulator state and evaluate actions; form
+Equation~\eqref{eq:cf-advantage}; add the detached sampled-action term in
+Equation~\eqref{eq:sca-update}; run ordinary PPO update. Keep this under half a
+page.
+
+\section{Experimental protocol}
+\label{sec:protocol}
+
+\subsection{Algorithms retained in the main paper}
+Keep only the following three learning curves in the main figures.
+\begin{center}
+\begin{tabular}{p{0.24\linewidth}p{0.66\linewidth}}
+\toprule
+\textbf{Method} & \textbf{Purpose} \\
+\midrule
+\ppo{} (GAE) & Standard policy-optimization baseline. \\
+Direct \ppocf{} & Counterfactual baseline using its direct all-action objective;
+shows what sparse queries are competing with. \\
+\pposca{} (2\% exact queries) & Proposed method: exact centered landscape added to
+the sampled-action actor advantage. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Methods removed from the main comparison.}
+Remove the following from the title, abstract, main figures, and headline table:
+uniform distillation, uncertainty distillation, active distillation, multiple
+student-selection schemes, TD clipping, shuffled/attack variants, and manual
+secondary-goal steering. They create an unreadable six-method plot and weaken
+the paper's causal message.
+
+\paragraph{Where the removed methods go.}
+Put uniform distillation in an ablation subsection because it motivates using
+exact sparse labels directly. Put active/uncertainty selection in the appendix
+as preliminary evidence only; it currently has three seeds. Put the
+secondary-goal result in the appendix or a final qualitative discussion. Do not
+silently delete negative results: show all removed variants in an appendix
+table with their configurations and seeds.
+
+\subsection{Environments and selection}
+The strongest four-panel learning-curve figure from
+\texttt{notebooks/06\_plot\_runs\_eval\_training\_curves.ipynb} is:
+\begin{enumerate}[leftmargin=1.6em]
+  \item MiniGrid-RedBlueDoors-6x6-v0;
+  \item MiniGrid-KeyCorridorS3R3-v0;
+  \item MiniGrid-DoorKey-6x6-v0;
+  \item MiniGrid-UnlockPickup-v0.
+\end{enumerate}
+KeyCorridor S3R2 should be in the appendix because its outcomes are visibly
+more variable. The pre-specified E2/E3 panel also includes Taxi. Re-export Taxi
+in the same evaluation format before submission so that the formal four-task
+table can use Taxi, DoorKey, UnlockPickup, and RedBlueDoors without mixing
+evaluation pipelines.
+
+\paragraph{Selection disclosure.}
+The current four visual environments were selected after inspecting existing
+curves. Do not make a post-selected average the primary inferential result.
+Either (i) freeze the proposed four-task set and run fresh confirmatory seeds,
+or (ii) report every completed task, including KeyCorridor S3R2, in the main
+aggregate and reserve the four-panel figure for readability. This is important
+for an ICLR submission.
+
+\subsection{Evaluation and reporting}
+Report mean success rate and episodic return as training curves with five-seed
+mean and uncertainty bands. Use time-to-threshold (e.g., frames to 90\% success)
+and final evaluation success in the main table. A normalized area-under-curve
+statistic can be reported in the table or appendix as a summary, but it should
+not be the centerpiece of the abstract.
+
+\section{Results}
+\label{sec:results}
+
+\subsection{Main result: sparse exact counterfactual queries improve learning}
+
+\paragraph{What to write.}
+Open this section with the qualitative conclusion, then point to the curves:
+``Across the displayed tasks, sparse exact counterfactual queries improve or
+accelerate PPO learning. The largest gains occur in tasks where the policy must
+make action-critical sequential decisions, rather than merely discover a
+terminal reward.'' Avoid saying the method universally dominates direct
+\ppocf{}; DoorKey is an explicit counterexample.
+
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+& \multicolumn{3}{c}{Normalized success during training} &
+Frames to 90\% success \\
+\cmidrule(lr){2-4}
+\textbf{Environment} & \ppo{} & Direct \ppocf{} & \pposca{} &
+\ppo{} $\rightarrow$ \pposca{} \\
+\midrule
+RedBlueDoors 6x6 & 0.528 & 0.636 & \textbf{0.710} & 848k $\rightarrow$ 695k \\
+KeyCorridor S3R3 & 0.677 & 0.655 & \textbf{0.826} & 268k $\rightarrow$ 152k \\
+DoorKey 6x6 & 0.492 & \textbf{0.633} & 0.534 & 285k $\rightarrow$ 273k \\
+UnlockPickup & 0.588 & 0.656 & \textbf{0.754} & 653k $\rightarrow$ 404k \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Table note to include in the final paper.}
+The normalized-success column above is a working extraction from the five-seed
+curves in Notebook 06, not yet a locked camera-ready statistic. Recompute it in
+one evaluation script, record uncertainty intervals, and state the exact
+integration convention. The numbers are useful for selecting the story but
+must be reproducible before being treated as final paper values.
+
+\paragraph{Figure 2.}
+Use a four-panel success-rate learning curve: PPO in blue, direct \ppocf{} in
+orange, and \pposca{} in green. Do not include active distillation. The existing
+focused plot can be simplified by removing its black active-distilled line.
+
+\subsection{Sparse exact labels are safer than naive dense distillation}
+
+\paragraph{What to write.}
+This is the key ablation, not a co-equal method. The question is whether the
+same 2\% label budget should be used immediately at queried states or learned
+and broadcast to all states. Write: ``The benefit is not explained simply by
+adding a dense auxiliary signal. On several tasks, approximation error in a
+student landscape is amplified when it is applied at every state, whereas exact
+queried values retain the correct local action ranking.''
+
+\paragraph{Results to use.}
+At $\beta=0.75$, exact queries have higher recorded success during training than
+uniform distillation in RedBlueDoors, Taxi, and UnlockPickup. The clearest
+example is RedBlueDoors: the uniform student variant has much lower final
+success and learning progress than the exact queried variant. DoorKey is the
+important exception, where distillation is competitive or better; report this
+plainly.
+
+\paragraph{Suggested figure/table.}
+Use one compact table with Query, Uniform-distill, and the difference for the
+pre-specified E2 environments. Keep the complete beta sweep in the appendix.
+Do not add active or uncertainty variants to this figure.
+
+\subsection{Action selectivity is the operative ingredient}
+
+\paragraph{What to write.}
+Tie the perturbation experiment back to the method: ``The centering in
+Equation~\eqref{eq:cf-advantage} is not cosmetic. Matched perturbations show
+that state-dependent offsets do not produce the observed behavior change;
+action alignment is required.'' Include the $\beta=0$ identity/null and, if
+available, an action-permuted counterfactual landscape control. This is the
+section that makes the paper more than an empirical oracle heuristic.
+
+\subsection{Cost and scope}
+
+\paragraph{What to write.}
+Report counterfactual branches, wall-clock time, and query fraction for PPO,
+direct \ppocf{}, and \pposca{}. Do not imply that the oracle is free. State that
+the present study assumes a simulator state-restoration interface and
+deterministic/local counterfactual rollouts. This makes the contribution an
+algorithmic result for structured simulators, not a claim about arbitrary
+model-free environments.
+
+\section{Discussion and limitations}
+\label{sec:discussion}
+
+\paragraph{Main discussion.}
+The results suggest that the useful resource is not a generic dense learned
+bonus. It is a correctly centered, action-level signal at states where an exact
+counterfactual can be trusted. Explain that this produces a practical spectrum:
+ordinary PPO uses no simulator intervention; direct \ppocf{} uses more complete
+counterfactual supervision; \pposca{} obtains much of the benefit from sparse
+queries.
+
+\paragraph{Limitations to state explicitly.}
+\begin{enumerate}[leftmargin=1.6em]
+  \item The current evidence is MiniGrid-heavy; a final submission should add
+  at least one non-MiniGrid environment with a valid restoration oracle.
+  \item The oracle is privileged simulator access. This is not a model-free
+  method unless a learned world model replaces the oracle.
+  \item The counterfactual horizon and $\beta$ are task-sensitive.
+  \item Distillation is not yet a solved scaling mechanism; the reported
+  negative result is part of the conclusion.
+\end{enumerate}
+
+\paragraph{Secondary-goal work.}
+Mention only as a future direction or appendix demonstration: an actor-only,
+reward-free advantage term can induce blue-token collection in a custom
+DetourPickup environment while retaining goal completion in the available
+two-seed experiment. Do \emph{not} claim a robust primary--secondary trade-off
+or general controllability from this result.
+
+\section{Appendix plan}
+\begin{enumerate}[leftmargin=1.6em]
+  \item Full five-environment Notebook 06 curves, including KeyCorridor S3R2.
+  \item Full E2 beta sweep for exact queried and uniform distilled landscapes.
+  \item E3 active/uncertainty results, marked as three-seed exploratory results.
+  \item Detailed derivation of the centered residual and the state-only null.
+  \item Oracle restoration checks, centering diagnostics, query counts, and
+  computational cost.
+  \item All configurations, seeds, evaluation seeds, and selection rules.
+  \item Secondary-goal implementation and its two-seed qualitative result.
+\end{enumerate}
+
+\section*{Final checklist before converting this pitch into a submission}
+\begin{enumerate}[leftmargin=1.6em]
+  \item Recreate every headline number with one locked evaluation script.
+  \item Freeze the environment and $\beta$ selection rules; run confirmation
+  seeds if the four-task figure remains post-selected.
+  \item Add Taxi to the common evaluation/plot pipeline or omit it consistently.
+  \item Add a matched action-permutation control if it is not already complete.
+  \item Measure query/oracle wall-clock cost against direct \ppocf{}.
+  \item Add one non-MiniGrid task before treating the work as ICLR-ready.
+\end{enumerate}
+
+\end{document}

@@ -1,4 +1,6 @@
 runs/
+runs_new/
+runs_eval/
 figures/
 __pycache__/
 *.pyc
@@ -15,3 +17,5 @@ logs/
 artifacts/wandb/
 artifacts/chunks/
 artifacts/manifests/
+Secondary_Goal_stuff/
+Adv_perturbation_experiments/

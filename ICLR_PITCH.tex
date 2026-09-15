@@ -19,43 +19,79 @@
 \maketitle
 
 \begin{abstract}
-Policy-gradient agents are usually controlled through rewards, although the
-policy is updated through an advantage estimator. We study \emph{counterfactual
-advantage steering}: augmenting PPO's actor update with a policy-centered,
-action-selective counterfactual advantage while leaving the environment reward,
-GAE targets, and critic update unchanged. We first show that a state-only
-advantage perturbation cancels from the expected policy gradient; behavioral
-control therefore requires an action-selective residual. Guided by this
-observation, our method queries exact local counterfactual action values at a
-small subset of rollout states and injects the resulting centered landscape
-into PPO's sampled-action objective. Across long-horizon visual control tasks,
-sparse counterfactual queries consistently improve learning relative to PPO and
-often match or exceed a more expensive direct counterfactual baseline. In
-contrast, globally propagating sparse labels through an imperfect distilled
-landscape can be unreliable. These results identify sparse, action-aligned
-counterfactual advantages as a lightweight control interface for policy
-optimization.
+Policy-gradient methods learn from advantage estimates, yet these estimates
+are usually treated as fixed consequences of a reward function. We argue that
+advantages can instead serve as a direct interface for steering learning. We
+introduce counterfactual advantage steering, which augments PPO's actor update
+with a policy-centered counterfactual advantage while leaving environment
+rewards, GAE returns, and critic targets unchanged. Our analysis shows that
+only the action-selective component of an advantage intervention can alter the
+expected policy gradient; state-only offsets cancel. Guided by this principle,
+we query local counterfactual action values at a sparse subset of rollout
+states and inject the resulting centered signal into the actor objective.
+Across long-horizon control tasks, this targeted intervention improves learning
+relative to standard PPO and often compares favorably with more expensive
+counterfactual baselines. Our results position advantage estimates not merely
+as credit-assignment outputs, but as a principled control surface for efficient
+policy learning.
 \end{abstract}
 
 \section*{Abstract 2: problem--need--method--importance}
 \begin{abstract}
-PPO is typically guided by modifying rewards, but reward design is often
-expensive, changes the task being optimized, and can unintentionally alter the
-critic's learning target. This is especially limiting in structured simulators,
-where a small number of local counterfactual evaluations may reveal which action
-is preferable without requiring a new reward function. We ask whether this
-privileged but sparse information can be used to guide the policy update
-directly. We introduce \emph{counterfactual advantage steering}, which adds a
-policy-centered, action-selective counterfactual advantage to PPO's actor loss
-at a small subset of rollout states, while preserving the environment reward,
-GAE returns, and critic update. Our analysis shows why action selectivity is
-necessary: state-only advantage offsets cancel from the expected policy
-gradient. Empirically, sparse exact counterfactual queries improve learning on
-long-horizon visual control tasks and are often more reliable than applying a
-distilled counterfactual estimate everywhere. By separating policy guidance
-from reward and value-target design, this work provides a practical route for
-using structured simulators to make policy optimization more efficient and
-controllable.
+Improving reinforcement-learning agents typically requires redesigning
+rewards, adding auxiliary objectives, or changing value targets. These
+interventions are difficult to tune and can change the task an agent is
+ultimately trained to solve. We propose steering learning at a more direct
+point: the advantage signal used by the policy update. Our method,
+counterfactual advantage steering, uses sparse simulator counterfactuals to
+estimate which actions are locally preferable and adds a centered action-level
+signal to PPO's actor advantage. The intervention does not modify the
+environment reward, return estimator, or critic objective. We show that policy
+steering requires action-selective advantage information, while state-only
+perturbations have no expected effect on the actor gradient. Experiments on
+sequential visual control tasks show that sparse exact counterfactual guidance
+can accelerate PPO learning and can be more reliable than propagating imperfect
+learned guidance across all states. This provides a lightweight alternative to
+reward redesign for structured environments with limited simulator access.
+\end{abstract}
+
+\section*{Abstract 3: sparse-query emphasis}
+\begin{abstract}
+Counterfactual information can reveal how an agent should act, but evaluating
+every possible action at every state is often too expensive for policy
+optimization. We ask whether a small number of exact counterfactual evaluations
+can still provide a useful learning signal. We introduce sparse
+counterfactual advantage steering for PPO. At selected rollout states, the
+method evaluates local counterfactual action values, centers them under the
+policy, and adds the resulting action-selective advantage to the actor update.
+Rewards, GAE targets, and critic learning remain unchanged. Our analysis
+identifies policy centering as essential: only the action-dependent residual of
+an advantage perturbation can influence the expected policy gradient. Across
+long-horizon MiniGrid tasks, sparse counterfactual queries improve learning over
+PPO and frequently outperform direct counterfactual optimization despite using
+substantially less counterfactual supervision. We also find that replacing
+exact sparse guidance with a dense distilled estimate can be unreliable,
+highlighting the value of accurate action-level information.
+\end{abstract}
+
+\section*{Abstract 4: actor-only control emphasis}
+\begin{abstract}
+The reward function is commonly the only mechanism used to tell a
+reinforcement-learning agent what matters. However, rewards are an indirect and
+inflexible way to shape learning: they influence both policy and value learning,
+and changing them can alter the underlying objective. We study whether learning
+can instead be steered through the policy's advantage signal. We introduce
+counterfactual advantage steering, an actor-only PPO intervention that uses
+local simulator counterfactuals to provide action-level guidance at sparse
+rollout states. The method preserves the original reward, returns, and critic
+targets, changing only the policy update. We establish that state-only
+advantage modifications cancel from the expected policy gradient, motivating a
+policy-centered counterfactual construction. On long-horizon decision tasks,
+sparse exact guidance improves the learning dynamics of PPO, while dense
+approximations of the same signal can fail when they distort the relevant action
+ranking. Our work shows that advantage estimates can provide a precise and
+modular mechanism for steering how agents learn without redefining what they
+are rewarded for.
 \end{abstract}
 
 \section*{One-sentence paper claim}
